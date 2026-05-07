@@ -1,5 +1,6 @@
 /**
- * Game-state engine.
+ * Game-state engine — single source of truth for every player- and
+ * server-driven mutation of the world.
  *
  * Hive layout: each player starts with a single `'hive'` tile at axial (0,0),
  * 6 `'storage'` slots at radius 1, and 12 `'active'` tiles at radius 2.
@@ -15,57 +16,67 @@
  * one by one until either bees collect them all or the patch is empty, at
  * which point a fresh patch spawns elsewhere.
  *
- * Workers operate on a queue of petal hexes selected by the player. SEND
- * WORKER snapshots the queue and dispatches one bee that visits each in
- * order. If a petal is gone when the bee arrives (collected, withered, or
- * the patch despawned) the bee skips it.
+ * Workers and carpenters are dispatched directly via a hold-to-send gesture
+ * on a target hex (the UI enforces the hold duration). Each dispatch spawns
+ * one single-trip bee — there is no queue. If the target is gone when the
+ * bee arrives (a withered petal, a collected petal, or a frontier hex that
+ * is no longer adjacent to the hive) the bee logs a miss and returns home.
+ *
+ * The dummy single-player AI lives in {@link tickSoloAi}; it is *not* called
+ * by {@link tickWorld} so the server can drive an authoritative tick without
+ * either side getting phantom AI commands. Solo callers compose them.
  */
 
 import {
   BEE_STATS,
   FLIGHT_TIMES,
-  FLOWER_LETTER_POOLS,
   HIVE,
-  chainScore,
+  type Bee,
+  type BeeFlight,
+  type BeePanel,
+  type BeeState,
+  type BeeWaypoint,
+} from '../bees.js';
+import {
+  FLOWER_LETTER_POOLS,
   drawFlowerLetter,
+  type FlowerType,
+  type Letter,
+} from '../letters.js';
+import {
   hex,
   hexEquals,
   hexKey,
   isValidPath,
   neighbors,
   range,
-  wordScore,
-  type Bee,
-  type BeeFlight,
-  type BeeWaypoint,
-  type FlowerPatch,
-  type FlowerType,
   type Hex,
-  type Letter,
-  type Petal,
-  type PlayerState,
-  type TileSnapshot,
-} from '@hivemind/shared';
+} from '../hex.js';
+import { chainScore, wordScore } from '../scoring.js';
+import { hexHpForTile } from '../tileHp.js';
+import type {
+  ActivityEntry,
+  FlowerPatch,
+  FreedLetter,
+  GameCommand,
+  Petal,
+  PlayerState,
+  Side,
+  TileSnapshot,
+  WorldPhase,
+  WorldSnapshot,
+} from '../messages.js';
 
-export type Side = 'self' | 'opponent';
-export type GamePhase = 'playing' | 'over';
-
-export interface ActivityEntry {
-  readonly id: string;
-  readonly t: number;
-  readonly ownerId: string;
-  readonly text: string;
-}
+export type { ActivityEntry, Side, WorldPhase } from '../messages.js';
 
 export interface World {
   readonly t: number;
-  readonly phase: GamePhase;
+  readonly phase: WorldPhase;
   readonly self: PlayerState;
   readonly opponent: PlayerState;
   readonly patches: readonly FlowerPatch[];
   readonly patchCooldown: number;
-  readonly aiQueueCooldown: number;
-  readonly aiSendCooldown: number;
+  readonly aiWorkerCooldown: number;
   readonly aiPlaceCooldown: number;
   readonly aiPhantomCooldown: number;
   readonly aiCarpenterCooldown: number;
@@ -91,13 +102,13 @@ export const PATCH_LIFETIME_SECONDS = 28;
  *  rings don't overlap. */
 export const PATCH_MIN_CENTER_DISTANCE = 3;
 export const ROUND_DURATION_SECONDS = 5 * 60;
-export const QUEUE_CAP = BEE_STATS.worker.capacity;
-export const CARPENTER_QUEUE_CAP = BEE_STATS.carpenter.capacity;
+export const QUEEN_LIFETIME_SECONDS = 10;
+const QUEEN_ACTION_INTERVAL_SECONDS = 0.45;
+const FREED_LETTER_LIFETIME_SECONDS = 6;
 const LOG_MAX_ENTRIES = 14;
 const PATCH_TYPES: readonly FlowerType[] = ['vowel', 'common', 'rare'];
 
-const AI_QUEUE_BASE = 3;
-const AI_SEND_BASE = 8;
+const AI_WORKER_BASE = 6;
 const AI_PLACE_BASE = 5;
 const AI_PHANTOM_BASE = 14;
 const AI_CARPENTER_BASE = 20;
@@ -117,17 +128,17 @@ const buildPlayer = (id: string): PlayerState => {
   const tiles: TileSnapshot[] = [];
   for (const h of range(hex(0, 0), HIVE_RADIUS)) {
     const ri = ringIndex(h);
-    if (ri === 0) tiles.push({ hex: h, state: 'hive', letter: null });
-    else if (ri === 1) tiles.push({ hex: h, state: 'storage', letter: null });
-    else tiles.push({ hex: h, state: 'active', letter: null });
+    if (ri === 0) tiles.push({ hex: h, state: 'hive', letter: null, reuseCount: 0, damage: 0 });
+    else if (ri === 1) tiles.push({ hex: h, state: 'storage', letter: null, reuseCount: 0, damage: 0 });
+    else tiles.push({ hex: h, state: 'active', letter: null, reuseCount: 0, damage: 0 });
   }
   return {
     id,
     honey: HIVE.startingHoney,
     tiles,
+    freedLetters: [],
     bees: [],
-    letterQueue: [],
-    carpenterQueue: [],
+    usedWordSignatures: [],
   };
 };
 
@@ -135,13 +146,23 @@ const buildPlayer = (id: string): PlayerState => {
 export const honeyRateFor = (player: PlayerState): number =>
   HIVE.regenPerHex * player.tiles.length;
 
-/** Honey storage cap: scales with the count of empty active tiles. */
+/**
+ * Honey storage cap: the central hive contributes {@link HIVE.hiveStorage}
+ * and every other owned tile (active / letter / capped / legacy inactive)
+ * contributes 1, *except* letter-storage slots which contribute 0. Storage
+ * slots are not honeycomb — they're delivery cubbies for unplaced letters.
+ *
+ * Filling a tile with a letter does not shrink the cap; only losing a tile
+ * (e.g. queen destruction) does.
+ */
 export const honeyCapFor = (player: PlayerState): number => {
-  const emptyActives = player.tiles.reduce(
-    (n, t) => n + (t.state === 'active' && !t.letter ? 1 : 0),
-    0,
-  );
-  return HIVE.capBase + HIVE.capPerEmptyTile * emptyActives;
+  let cap = 0;
+  for (const t of player.tiles) {
+    if (t.state === 'hive') cap += HIVE.hiveStorage;
+    else if (t.state === 'storage') continue;
+    else cap += 1;
+  }
+  return cap;
 };
 
 /** Add `bonus` honey to `player`, clamped at their current cap. */
@@ -176,8 +197,16 @@ const patchCenterCandidates: readonly Hex[] = range(hex(0, 0), FIELD_RADIUS).fil
   (h) => neighbors(h).every((n) => ringIndex(n) <= FIELD_RADIUS),
 );
 
+/**
+ * Spawn a single patch of the requested type at one of the available center
+ * candidates. Returns null if every candidate is too close to an existing
+ * patch (no room to bloom). Type is chosen by the caller so the field can
+ * maintain its 1-of-each invariant; see {@link missingPatchTypes} and
+ * {@link seedPatches}.
+ */
 const spawnPatch = (
   existing: readonly FlowerPatch[],
+  type: FlowerType,
   rng: () => number,
   spawnedAt: number,
 ): FlowerPatch | null => {
@@ -186,7 +215,6 @@ const spawnPatch = (
   );
   if (free.length === 0) return null;
   const center = free[Math.floor(rng() * free.length)]!;
-  const type = PATCH_TYPES[Math.floor(rng() * PATCH_TYPES.length)]!;
   // Spread petal wither times across [0.45, 1.0] of lifetime in random order so
   // the visual decay has organic timing.
   const order = neighbors(center)
@@ -212,10 +240,17 @@ const spawnPatch = (
   };
 };
 
+/** Which of the three patch types are not currently present in the field. */
+const missingPatchTypes = (patches: readonly FlowerPatch[]): FlowerType[] => {
+  const present = new Set(patches.map((p) => p.type));
+  return PATCH_TYPES.filter((t) => !present.has(t));
+};
+
+/** Seed the initial field with one patch of each type, in canonical order. */
 const seedPatches = (rng: () => number, t: number): FlowerPatch[] => {
   const result: FlowerPatch[] = [];
-  while (result.length < PATCH_TARGET_COUNT) {
-    const p = spawnPatch(result, rng, t);
+  for (const type of PATCH_TYPES) {
+    const p = spawnPatch(result, type, rng, t);
     if (!p) break;
     result.push(p);
   }
@@ -248,15 +283,22 @@ const removePetal = (
     )
     .filter((p) => p.petals.length > 0);
 
-export const buildInitialWorld = (rng: () => number): World => ({
+/**
+ * Build a fresh world. Pass two distinct ids when running a real PvP match
+ * (`buildInitialWorld(rng, { selfId, opponentId })`) so log entries and
+ * serialised player ids are stable across server snapshots.
+ */
+export const buildInitialWorld = (
+  rng: () => number,
+  ids: { selfId: string; opponentId: string } = { selfId: 'self', opponentId: 'opponent' },
+): World => ({
   t: 0,
   phase: 'playing',
-  self: buildPlayer('self'),
-  opponent: buildPlayer('opponent'),
+  self: buildPlayer(ids.selfId),
+  opponent: buildPlayer(ids.opponentId),
   patches: seedPatches(rng, 0),
   patchCooldown: PATCH_RESPAWN_SECONDS,
-  aiQueueCooldown: AI_QUEUE_BASE,
-  aiSendCooldown: AI_SEND_BASE,
+  aiWorkerCooldown: AI_WORKER_BASE,
   aiPlaceCooldown: AI_PLACE_BASE,
   aiPhantomCooldown: AI_PHANTOM_BASE,
   aiCarpenterCooldown: AI_CARPENTER_BASE,
@@ -318,6 +360,10 @@ const pickEmptyStorage = (player: PlayerState): TileSnapshot | null => {
 
 // ---- Top-level tick --------------------------------------------------------
 
+/**
+ * Advance the world by `dt` seconds with no AI. The server calls this for
+ * authoritative simulation; solo clients compose with {@link tickSoloAi}.
+ */
 export const tickWorld = (world: World, dt: number, rng: () => number): World => {
   if (world.phase === 'over') return world;
   let next: World = {
@@ -327,15 +373,39 @@ export const tickWorld = (world: World, dt: number, rng: () => number): World =>
     opponent: tickHoney(world.opponent, dt),
   };
   next = resolveArrivedBees(next);
+  next = tickQueens(next);
+  next = tickFreedLetters(next);
   next = tickPatches(next, dt, rng);
-  next = tickDummyAi(next, dt, rng);
   return checkVictory(next);
+};
+
+/** Solo wrapper: sim + dummy opponent in one call. */
+export const tickSolo = (world: World, dt: number, rng: () => number): World =>
+  tickSoloAi(tickWorld(world, dt, rng), dt, rng);
+
+const tickFreedLetters = (world: World): World => {
+  const trim = (letters: readonly FreedLetter[]) => letters.filter((l) => l.witherAt > world.t);
+  const selfCurrent = world.self.freedLetters ?? [];
+  const oppCurrent = world.opponent.freedLetters ?? [];
+  const self = trim(selfCurrent);
+  const opponent = trim(oppCurrent);
+  if (self.length === selfCurrent.length && opponent.length === oppCurrent.length) {
+    return world;
+  }
+  return {
+    ...world,
+    self: { ...world.self, freedLetters: self },
+    opponent: { ...world.opponent, freedLetters: opponent },
+  };
 };
 
 /**
  * Wither petals whose `witherAt` has elapsed, drop empty patches, and respawn
- * up to {@link PATCH_TARGET_COUNT} flowers (one per cooldown cycle so deaths
- * stagger visually).
+ * any patch type that's missing from the field. The field maintains a strict
+ * 1-of-each invariant — vowel + common + rare — so when a patch dies the
+ * cooldown cycle replaces it with the same type that just disappeared.
+ * If multiple patches die in quick succession, types are refilled one per
+ * cycle so deaths visibly stagger.
  */
 const tickPatches = (world: World, dt: number, rng: () => number): World => {
   const wilted: { type: FlowerType; letter: Letter }[] = [];
@@ -349,9 +419,13 @@ const tickPatches = (world: World, dt: number, rng: () => number): World => {
   patches = patches.filter((p) => p.petals.length > 0);
 
   let cooldown = world.patchCooldown - dt;
-  if (patches.length < PATCH_TARGET_COUNT) {
+  const missing = missingPatchTypes(patches);
+  if (missing.length > 0) {
     if (cooldown <= 0) {
-      const fresh = spawnPatch(patches, rng, world.t);
+      // If several types are simultaneously missing, pick one at random to
+      // start with; the next cycle picks up the rest.
+      const type = missing[Math.floor(rng() * missing.length)]!;
+      const fresh = spawnPatch(patches, type, rng, world.t);
       if (fresh) {
         patches = [...patches, fresh];
         cooldown = PATCH_RESPAWN_SECONDS;
@@ -592,6 +666,72 @@ const resolveSideBees = (world: World, side: Side): World => {
       continue;
     }
 
+    if (bee.state.kind === 'worker-flying-to-freed') {
+      const freedTargetHex = bee.state.target;
+      const found = (updatedPlayer.freedLetters ?? []).find((f) =>
+        hexEquals(f.hex, freedTargetHex),
+      );
+      if (!found) {
+        remainingBees.push({
+          ...bee,
+          state: {
+            kind: 'worker-returning',
+            flight: flight(
+              sideHivePanel(side),
+              freedTargetHex,
+              sideHivePanel(side),
+              hex(0, 0),
+              next.t,
+              FLIGHT_TIMES.tileToHive,
+            ),
+          },
+        });
+        beesChanged = true;
+        continue;
+      }
+      updatedPlayer = {
+        ...updatedPlayer,
+        freedLetters: (updatedPlayer.freedLetters ?? []).filter((f) => f.id !== found.id),
+      };
+      const drop = pickEmptyStorage(updatedPlayer);
+      if (!drop) {
+        remainingBees.push({
+          ...bee,
+          state: {
+            kind: 'worker-returning',
+            flight: flight(
+              sideHivePanel(side),
+              freedTargetHex,
+              sideHivePanel(side),
+              hex(0, 0),
+              next.t,
+              FLIGHT_TIMES.tileToHive,
+            ),
+          },
+        });
+      } else {
+        remainingBees.push({
+          ...bee,
+          state: {
+            kind: 'worker-flying-to-drop',
+            queue: [],
+            carrying: found.letter,
+            dropTile: drop.hex,
+            flight: flight(
+              sideHivePanel(side),
+              freedTargetHex,
+              sideHivePanel(side),
+              drop.hex,
+              next.t,
+              FLIGHT_TIMES.tileToHive,
+            ),
+          },
+        });
+      }
+      beesChanged = true;
+      continue;
+    }
+
     if (bee.state.kind === 'worker-returning') {
       // Despawn — drop the bee from the player's bees array.
       beesChanged = true;
@@ -602,9 +742,11 @@ const resolveSideBees = (world: World, side: Side): World => {
       const paths = bee.state.paths;
       const wordsLetters: Letter[][] = [];
       const allCappedHexes: Hex[] = [];
+      const reuseIncrementsByKey = new Map<string, number>();
       for (const path of paths) {
         const letters: Letter[] = [];
         let valid = true;
+        const cappedHitsThisPath: Hex[] = [];
         for (const h of path) {
           const tile = updatedPlayer.tiles.find((t) => hexEquals(t.hex, h));
           if (
@@ -616,11 +758,16 @@ const resolveSideBees = (world: World, side: Side): World => {
             break;
           }
           letters.push(tile.letter);
+          if (tile.state === 'capped') cappedHitsThisPath.push(h);
         }
         if (valid && letters.length >= 2) {
           wordsLetters.push(letters);
           for (const h of path) {
             if (!allCappedHexes.some((c) => hexEquals(c, h))) allCappedHexes.push(h);
+          }
+          for (const h of cappedHitsThisPath) {
+            const k = hexKey(h);
+            reuseIncrementsByKey.set(k, (reuseIncrementsByKey.get(k) ?? 0) + 1);
           }
         } else {
           next = logEvent(next, {
@@ -641,11 +788,17 @@ const resolveSideBees = (world: World, side: Side): World => {
           : wordsLetters.reduce((s, w) => s + wordScore(w), 0);
         updatedPlayer = {
           ...updatedPlayer,
-          tiles: updatedPlayer.tiles.map((t) =>
-            allCappedHexes.some((h) => hexEquals(h, t.hex))
-              ? { ...t, state: 'capped' }
-              : t,
-          ),
+          tiles: updatedPlayer.tiles.map((t) => {
+            const k = hexKey(t.hex);
+            const shouldCap = allCappedHexes.some((h) => hexEquals(h, t.hex));
+            const reuseInc = reuseIncrementsByKey.get(k) ?? 0;
+            if (!shouldCap && reuseInc === 0) return t;
+            return {
+              ...t,
+              state: shouldCap ? 'capped' : t.state,
+              reuseCount: (t.reuseCount ?? 0) + reuseInc,
+            };
+          }),
         };
         updatedPlayer = grantHoney(updatedPlayer, bonus);
         const summary = wordsLetters.map((w) => w.join('')).join(' + ');
@@ -699,7 +852,7 @@ const resolveSideBees = (world: World, side: Side): World => {
             ...updatedPlayer,
             tiles: [
               ...updatedPlayer.tiles,
-              { hex: target, state: 'active' as const, letter: null },
+              { hex: target, state: 'active' as const, letter: null, reuseCount: 0, damage: 0 },
             ],
           };
           next = logEvent(next, {
@@ -760,6 +913,34 @@ const resolveSideBees = (world: World, side: Side): World => {
       beesChanged = true;
       continue;
     }
+
+    if (bee.state.kind === 'queen-flying') {
+      // Arrived at the opponent grid — switch to autonomous assault. The first
+      // attack lands a short beat after touchdown so the player can register
+      // the hand-off visually.
+      remainingBees.push({
+        ...bee,
+        state: {
+          kind: 'queen-assault',
+          panel: bee.state.assaultPanel,
+          currentHex: bee.state.landingHex,
+          expiresAt: bee.state.expiresAt,
+          nextActionAt: next.t + 0.25,
+        },
+      });
+      next = logEvent(next, {
+        t: next.t,
+        ownerId: player.id,
+        text: `queen lands`,
+      });
+      beesChanged = true;
+      continue;
+    }
+
+    if (bee.state.kind === 'queen-assault') {
+      remainingBees.push(bee);
+      continue;
+    }
   }
 
   if (beesChanged) {
@@ -772,13 +953,160 @@ const resolveSideBees = (world: World, side: Side): World => {
   return next;
 };
 
+/**
+ * Pick the next hex the queen should attack from `from`.
+ *
+ * BFS distances are measured *outward from the hive* through owned tiles, so
+ * the queen can route correctly whether she is currently sitting on an owned
+ * tile or inside a hex she just destroyed. From `from`, we choose the
+ * neighbour with the smallest BFS distance — preferring the hive itself when
+ * adjacent so the killing blow is taken as soon as possible.
+ */
+const firstStepTowardHive = (player: PlayerState, from: Hex): Hex | null => {
+  const goal = hex(0, 0);
+  const ownedTiles = new Map(player.tiles.map((t) => [hexKey(t.hex), t.hex]));
+  if (!ownedTiles.has(hexKey(goal))) return null;
+  const dist = new Map<string, number>();
+  dist.set(hexKey(goal), 0);
+  const q: Hex[] = [goal];
+  while (q.length > 0) {
+    const cur = q.shift()!;
+    const d = dist.get(hexKey(cur))!;
+    for (const n of neighbors(cur)) {
+      const nk = hexKey(n);
+      if (!ownedTiles.has(nk) || dist.has(nk)) continue;
+      dist.set(nk, d + 1);
+      q.push(n);
+    }
+  }
+  let best: Hex | null = null;
+  let bestDist = Infinity;
+  for (const n of neighbors(from)) {
+    const nk = hexKey(n);
+    const d = dist.get(nk);
+    if (d === undefined) continue;
+    if (d < bestDist) {
+      bestDist = d;
+      best = ownedTiles.get(nk) ?? n;
+    }
+  }
+  return best;
+};
+
+const destroyTile = (player: PlayerState, h: Hex, t: number): PlayerState => {
+  const tile = player.tiles.find((x) => hexEquals(x.hex, h));
+  if (!tile || tile.state === 'hive') return player;
+  const nextTiles = player.tiles.filter((x) => !hexEquals(x.hex, h));
+  const freed =
+    tile.letter !== null
+      ? [
+          ...(player.freedLetters ?? []),
+          {
+            id: newId(),
+            hex: h,
+            letter: tile.letter,
+            spawnedAt: t,
+            witherAt: t + FREED_LETTER_LIFETIME_SECONDS,
+          },
+        ]
+      : (player.freedLetters ?? []);
+  return { ...player, tiles: nextTiles, freedLetters: freed };
+};
+
+const tickQueens = (world: World): World => {
+  let next = world;
+  for (const side of ['self', 'opponent'] as const) {
+    const attacker = next[side];
+    const defenderSide = otherSide(side);
+    let defender = next[defenderSide];
+    const bees: Bee[] = [];
+    let dirty = false;
+    for (const bee of attacker.bees) {
+      if (bee.state.kind !== 'queen-assault') {
+        bees.push(bee);
+        continue;
+      }
+      dirty = true;
+      if (next.t >= bee.state.expiresAt) continue;
+      if (next.t < bee.state.nextActionAt) {
+        bees.push(bee);
+        continue;
+      }
+      const step = firstStepTowardHive(defender, bee.state.currentHex);
+      if (!step) {
+        bees.push({
+          ...bee,
+          state: { ...bee.state, nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS },
+        });
+        continue;
+      }
+      const targetTile = defender.tiles.find((t) => hexEquals(t.hex, step));
+      if (!targetTile) {
+        bees.push({
+          ...bee,
+          state: {
+            ...bee.state,
+            currentHex: step,
+            nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS,
+          },
+        });
+        continue;
+      }
+      if (targetTile.state === 'hive') {
+        next = logEvent(next, {
+          t: next.t,
+          ownerId: attacker.id,
+          text: `queen breached hive!`,
+        });
+        return { ...next, phase: 'over', winner: side };
+      }
+      const nextDamage = (targetTile.damage ?? 0) + 1;
+      if (nextDamage >= hexHpForTile(targetTile)) {
+        defender = destroyTile(defender, step, next.t);
+        next = logEvent(next, {
+          t: next.t,
+          ownerId: attacker.id,
+          text: `queen smashed ${targetTile.letter ?? 'tile'}`,
+        });
+        bees.push({
+          ...bee,
+          state: {
+            ...bee.state,
+            currentHex: step,
+            nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS,
+          },
+        });
+      } else {
+        defender = {
+          ...defender,
+          tiles: defender.tiles.map((t) =>
+            hexEquals(t.hex, step) ? { ...t, damage: nextDamage } : t,
+          ),
+        };
+        bees.push({
+          ...bee,
+          state: { ...bee.state, nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS },
+        });
+      }
+    }
+    if (dirty) {
+      const updatedAttacker = { ...attacker, bees };
+      next = setPlayer(next, side, updatedAttacker);
+      next = setPlayer(next, defenderSide, defender);
+    }
+  }
+  return next;
+};
+
 const arrivalOf = (bee: Bee): number | null => {
   switch (bee.state.kind) {
     case 'worker-flying-to-flower':
     case 'worker-flying-to-drop':
+    case 'worker-flying-to-freed':
     case 'worker-returning':
     case 'carpenter-flying':
     case 'carpenter-returning':
+    case 'queen-flying':
       return bee.state.flight.arrivesAt;
     case 'capping':
       return bee.state.arrivesAt;
@@ -793,71 +1121,98 @@ export type CommandResult =
   | { ok: true; world: World }
   | { ok: false; world: World; reason: string };
 
-export const toggleLetterQueue = (world: World, side: Side, h: Hex): CommandResult => {
-  const player = world[side];
-  const exists = player.letterQueue.some((q) => hexEquals(q, h));
-  if (exists) {
-    return {
-      ok: true,
-      world: setPlayer(world, side, {
-        ...player,
-        letterQueue: player.letterQueue.filter((q) => !hexEquals(q, h)),
-      }),
-    };
-  }
-  if (player.letterQueue.length >= QUEUE_CAP) {
-    return { ok: false, world, reason: `queue full (max ${QUEUE_CAP})` };
-  }
-  if (!petalAt(world.patches, h)) {
-    return { ok: false, world, reason: 'no flower here' };
-  }
-  return {
-    ok: true,
-    world: setPlayer(world, side, {
-      ...player,
-      letterQueue: [...player.letterQueue, h],
-    }),
-  };
-};
-
-export const trySpawnWorker = (world: World, side: Side): CommandResult => {
+/**
+ * Hold-to-send: spawn a single-trip worker bee that flies to one petal,
+ * collects it, drops it in an empty storage slot, and returns. There is no
+ * queue — every dispatch costs `worker.honeyCost`.
+ */
+export const dispatchWorker = (world: World, side: Side, target: Hex): CommandResult => {
   const player = world[side];
   const cost = BEE_STATS.worker.honeyCost;
   if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
-  if (player.letterQueue.length === 0)
-    return { ok: false, world, reason: 'no letters selected' };
+  const flowerTarget = petalAt(world.patches, target);
+  const freedTarget = (player.freedLetters ?? []).find((f) => hexEquals(f.hex, target));
+  if (!flowerTarget && !freedTarget) return { ok: false, world, reason: 'no letter here' };
   const emptyStorage = player.tiles.some((t) => t.state === 'storage' && !t.letter);
-  if (!emptyStorage)
+  if (!emptyStorage) {
     return { ok: false, world, reason: 'storage is full' };
+  }
 
-  const [target, ...rest] = player.letterQueue;
-  if (!target) return { ok: false, world, reason: 'no letters selected' };
-
+  const panel = sideHivePanel(side);
   const bee: Bee = {
     id: newId(),
     kind: 'worker',
     ownerId: player.id,
     capacity: BEE_STATS.worker.capacity,
-    state: {
-      kind: 'worker-flying-to-flower',
-      queue: rest,
-      target,
-      flight: flight(
-        sideHivePanel(side),
-        hex(0, 0),
-        'flowers',
-        target,
-        world.t,
-        FLIGHT_TIMES.hiveToFlower,
-      ),
-    },
+    state: flowerTarget
+      ? {
+          kind: 'worker-flying-to-flower',
+          queue: [],
+          target,
+          flight: flight(panel, hex(0, 0), 'flowers', target, world.t, FLIGHT_TIMES.hiveToFlower),
+        }
+      : {
+          kind: 'worker-flying-to-freed',
+          target,
+          flight: flight(panel, hex(0, 0), panel, target, world.t, FLIGHT_TIMES.hiveToTile),
+        },
   };
 
   const updated: PlayerState = {
     ...player,
     honey: player.honey - cost,
     bees: [...player.bees, bee],
-    letterQueue: [],
+  };
+  return { ok: true, world: setPlayer(world, side, updated) };
+};
+
+/**
+ * Spawn a queen that flies from the player's hive across to the opponent's
+ * outer ring, then autonomously chews her way inward toward the central hive
+ * tile. Costs {@link BEE_STATS.queen.honeyCost}; only one queen can be alive
+ * at a time per side.
+ */
+export const dispatchQueen = (world: World, side: Side): CommandResult => {
+  const player = world[side];
+  const cost = BEE_STATS.queen.honeyCost;
+  if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
+  const alreadyPresent = player.bees.some(
+    (b) => b.state.kind === 'queen-flying' || b.state.kind === 'queen-assault',
+  );
+  if (alreadyPresent) return { ok: false, world, reason: 'queen already active' };
+  const enemy = world[otherSide(side)];
+  // Land on the opponent's outermost (highest cube-distance) non-hive tile so
+  // the assault has the most travel through their grid.
+  const landing = enemy.tiles
+    .filter((t) => t.state !== 'hive')
+    .sort((a, b) => cubeDistance(b.hex, hex(0, 0)) - cubeDistance(a.hex, hex(0, 0)))[0]?.hex;
+  if (!landing) return { ok: false, world, reason: 'enemy hive unavailable' };
+  const ownerPanel = sideHivePanel(side);
+  const enemyPanel = sideHivePanel(otherSide(side));
+  const bee: Bee = {
+    id: newId(),
+    kind: 'queen',
+    ownerId: player.id,
+    capacity: 1,
+    state: {
+      kind: 'queen-flying',
+      assaultPanel: enemyPanel,
+      landingHex: landing,
+      expiresAt: world.t + FLIGHT_TIMES.queenToHive + QUEEN_LIFETIME_SECONDS,
+      flight: flight(
+        ownerPanel,
+        hex(0, 0),
+        enemyPanel,
+        landing,
+        world.t,
+        FLIGHT_TIMES.queenToHive,
+      ),
+    },
+  };
+  const updated: PlayerState = {
+    ...player,
+    honey: player.honey - cost,
+    bees: [...player.bees, bee],
   };
   return { ok: true, world: setPlayer(world, side, updated) };
 };
@@ -896,8 +1251,8 @@ export const placeLetter = (
 /**
  * Submit one or more drafted word paths for capping. Each path must be at
  * least 2 tiles, contiguous, and pass only over `letter` or `capped` tiles
- * (capped tiles are the branch points of the Scrabble model). Up to
- * `drone.capacity` paths are accepted per submission.
+ * (capped tiles are the branch points of the Scrabble model). A prior
+ * word+hex-letter combination cannot be submitted again.
  */
 export const trySubmitWord = (
   world: World,
@@ -908,15 +1263,13 @@ export const trySubmitWord = (
   const cost = BEE_STATS.drone.honeyCost;
   if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
   if (paths.length === 0) return { ok: false, world, reason: 'no words submitted' };
-  if (paths.length > BEE_STATS.drone.capacity)
-    return {
-      ok: false,
-      world,
-      reason: `too many words (max ${BEE_STATS.drone.capacity})`,
-    };
+  const seenSignatures = new Set(player.usedWordSignatures);
+  const nextSignatures: string[] = [];
   for (const path of paths) {
     if (path.length < 2) return { ok: false, world, reason: 'word too short' };
     if (!isValidPath(path)) return { ok: false, world, reason: 'path is not contiguous' };
+    const letters: Letter[] = [];
+    const placements: string[] = [];
     for (const h of path) {
       const tile = player.tiles.find((t) => hexEquals(t.hex, h));
       if (
@@ -926,7 +1279,18 @@ export const trySubmitWord = (
       ) {
         return { ok: false, world, reason: 'path includes a non-letter tile' };
       }
+      letters.push(tile.letter);
+      placements.push(`${h.q},${h.r}:${tile.letter}`);
     }
+    const word = letters.join('');
+    // Signature is independent of drag direction: same word + same lettered
+    // hex assignments cannot be scored repeatedly.
+    const signature = `${word}|${placements.sort().join('|')}`;
+    if (seenSignatures.has(signature)) {
+      return { ok: false, world, reason: 'word already used on these tiles' };
+    }
+    seenSignatures.add(signature);
+    nextSignatures.push(signature);
   }
   const flightSeconds = FLIGHT_TIMES.cappingPerPath * paths.length;
   const bee: Bee = {
@@ -946,6 +1310,7 @@ export const trySubmitWord = (
     ...player,
     honey: player.honey - cost,
     bees: [...player.bees, bee],
+    usedWordSignatures: [...player.usedWordSignatures, ...nextSignatures],
   };
   return { ok: true, world: setPlayer(world, side, updated) };
 };
@@ -963,50 +1328,22 @@ const isCarpenterEligible = (player: PlayerState, h: Hex): boolean => {
   });
 };
 
-export const toggleCarpenterTarget = (
+/**
+ * Hold-to-send: spawn a single-trip carpenter bee that flies to one frontier
+ * (or legacy `inactive`) hex and activates it. No queue — every dispatch
+ * costs `carpenter.honeyCost`.
+ */
+export const dispatchCarpenter = (
   world: World,
   side: Side,
-  h: Hex,
+  target: Hex,
 ): CommandResult => {
-  const player = world[side];
-  const exists = player.carpenterQueue.some((q) => hexEquals(q, h));
-  if (exists) {
-    return {
-      ok: true,
-      world: setPlayer(world, side, {
-        ...player,
-        carpenterQueue: player.carpenterQueue.filter((q) => !hexEquals(q, h)),
-      }),
-    };
-  }
-  if (player.carpenterQueue.length >= CARPENTER_QUEUE_CAP) {
-    return {
-      ok: false,
-      world,
-      reason: `carpenter queue full (max ${CARPENTER_QUEUE_CAP})`,
-    };
-  }
-  if (!isCarpenterEligible(player, h)) {
-    return { ok: false, world, reason: 'tile must touch your hive' };
-  }
-  return {
-    ok: true,
-    world: setPlayer(world, side, {
-      ...player,
-      carpenterQueue: [...player.carpenterQueue, h],
-    }),
-  };
-};
-
-export const trySpawnCarpenter = (world: World, side: Side): CommandResult => {
   const player = world[side];
   const cost = BEE_STATS.carpenter.honeyCost;
   if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
-  if (player.carpenterQueue.length === 0)
-    return { ok: false, world, reason: 'no tiles selected' };
-
-  const [target, ...rest] = player.carpenterQueue;
-  if (!target) return { ok: false, world, reason: 'no tiles selected' };
+  if (!isCarpenterEligible(player, target)) {
+    return { ok: false, world, reason: 'tile must touch your hive' };
+  }
 
   const bee: Bee = {
     id: newId(),
@@ -1015,7 +1352,7 @@ export const trySpawnCarpenter = (world: World, side: Side): CommandResult => {
     capacity: BEE_STATS.carpenter.capacity,
     state: {
       kind: 'carpenter-flying',
-      queue: rest,
+      queue: [],
       target,
       flight: flight(
         sideHivePanel(side),
@@ -1032,49 +1369,162 @@ export const trySpawnCarpenter = (world: World, side: Side): CommandResult => {
     ...player,
     honey: player.honey - cost,
     bees: [...player.bees, bee],
-    carpenterQueue: [],
   };
   return { ok: true, world: setPlayer(world, side, updated) };
 };
 
-// ---- Dummy AI --------------------------------------------------------------
+// ---- Unified command + snapshot surface -----------------------------------
 
-const tickDummyAi = (world: World, dt: number, rng: () => number): World => {
+/**
+ * Apply a typed {@link GameCommand} to the world for the given side. This is
+ * the single entry point both the authoritative server and the local client
+ * use to mutate the world from a player action — keep new dispatch verbs
+ * routed through here so the wire protocol and engine stay in lockstep.
+ */
+export const applyCommand = (
+  world: World,
+  side: Side,
+  cmd: GameCommand,
+): CommandResult => {
+  switch (cmd.kind) {
+    case 'dispatchWorker':
+      return dispatchWorker(world, side, cmd.target);
+    case 'dispatchCarpenter':
+      return dispatchCarpenter(world, side, cmd.target);
+    case 'dispatchQueen':
+      return dispatchQueen(world, side);
+    case 'placeLetter':
+      return placeLetter(world, side, cmd.from, cmd.to);
+    case 'submitWords':
+      return trySubmitWord(world, side, cmd.paths);
+  }
+};
+
+/**
+ * Flip a {@link BeePanel} between the two hive panels. The `'flowers'` panel
+ * is shared between players and is left alone.
+ */
+const flipPanel = (panel: BeePanel): BeePanel =>
+  panel === 'self-hive' ? 'opponent-hive' : panel === 'opponent-hive' ? 'self-hive' : panel;
+
+const flipFlight = (flight: BeeFlight): BeeFlight => ({
+  ...flight,
+  from: { ...flight.from, panel: flipPanel(flight.from.panel) },
+  to: { ...flight.to, panel: flipPanel(flight.to.panel) },
+});
+
+/**
+ * Rewrite every panel reference inside a bee's `state` so that `'self-hive'`
+ * and `'opponent-hive'` are swapped. Hex coordinates are global (the same
+ * hex grid is rendered on both sides) and don't need transformation. This is
+ * the joiner-perspective half of {@link worldToSnapshot}.
+ */
+const flipBeePanels = (bee: Bee): Bee => {
+  const s = bee.state;
+  let next: BeeState;
+  switch (s.kind) {
+    case 'worker-flying-to-flower':
+    case 'worker-flying-to-drop':
+    case 'worker-flying-to-freed':
+    case 'worker-returning':
+    case 'carpenter-flying':
+    case 'carpenter-returning':
+      next = { ...s, flight: flipFlight(s.flight) };
+      break;
+    case 'queen-flying':
+      next = {
+        ...s,
+        flight: flipFlight(s.flight),
+        assaultPanel: flipPanel(s.assaultPanel) as 'self-hive' | 'opponent-hive',
+      };
+      break;
+    case 'capping':
+    case 'queen-assault':
+      next = { ...s, panel: flipPanel(s.panel) as 'self-hive' | 'opponent-hive' };
+      break;
+  }
+  return { ...bee, state: next };
+};
+
+const flipPlayerBees = (player: PlayerState): PlayerState => ({
+  ...player,
+  bees: player.bees.map(flipBeePanels),
+});
+
+/**
+ * Project a server-side {@link World} into the {@link WorldSnapshot} a single
+ * client receives. The viewer always sees themselves as `self`. For the room's
+ * "opponent" player we swap the sides, remap `world.winner`, and rewrite the
+ * `panel` labels baked into every bee's state so the renderer draws bees on
+ * the right hive panel — without that remap, the joiner would see their own
+ * bees flying out of the opponent's hive.
+ */
+export const worldToSnapshot = (
+  world: World,
+  viewerSide: Side,
+  tick: number,
+): WorldSnapshot => {
+  const swap = viewerSide !== 'self';
+  const rawSelf = swap ? world.opponent : world.self;
+  const rawOpp = swap ? world.self : world.opponent;
+  const self = swap ? flipPlayerBees(rawSelf) : rawSelf;
+  const opponent = swap ? flipPlayerBees(rawOpp) : rawOpp;
+  const winner =
+    world.winner === null ? null : world.winner === viewerSide ? 'self' : 'opponent';
+  return {
+    t: world.t,
+    tick,
+    phase: world.phase,
+    winner,
+    self,
+    opponent,
+    patches: world.patches,
+    log: world.log,
+  };
+};
+
+// ---- Solo dummy AI ---------------------------------------------------------
+
+/**
+ * Apply a single tick of the dummy single-player AI. *Not* called by
+ * {@link tickWorld} — solo callers either use {@link tickSolo} or compose
+ * `tickSoloAi(tickWorld(world, dt, rng), dt, rng)` themselves. The server
+ * never invokes this in PvP.
+ */
+export const tickSoloAi = (world: World, dt: number, rng: () => number): World => {
+  if (world.phase === 'over') return world;
   let next = world;
   let {
-    aiQueueCooldown,
-    aiSendCooldown,
+    aiWorkerCooldown,
     aiPlaceCooldown,
     aiPhantomCooldown,
     aiCarpenterCooldown,
   } = next;
-  aiQueueCooldown -= dt;
-  aiSendCooldown -= dt;
+  aiWorkerCooldown -= dt;
   aiPlaceCooldown -= dt;
   aiPhantomCooldown -= dt;
   aiCarpenterCooldown -= dt;
 
-  if (aiQueueCooldown <= 0) {
-    const allPetals = next.patches.flatMap((p) => p.petals.map((pt) => pt.hex));
-    if (next.opponent.letterQueue.length < 3 && allPetals.length > 0) {
-      const available = allPetals.filter(
-        (h) => !next.opponent.letterQueue.some((q) => hexEquals(q, h)),
-      );
+  if (aiWorkerCooldown <= 0) {
+    // Send a worker if storage has room, the AI can afford it, and a petal
+    // is available that no other in-flight worker is already chasing.
+    const ai = next.opponent;
+    const hasStorageRoom = ai.tiles.some((t) => t.state === 'storage' && !t.letter);
+    if (hasStorageRoom && ai.honey >= BEE_STATS.worker.honeyCost) {
+      const claimed = new Set<string>();
+      for (const b of ai.bees) {
+        if (b.state.kind === 'worker-flying-to-flower') claimed.add(hexKey(b.state.target));
+      }
+      const available = next.patches
+        .flatMap((p) => p.petals.map((pt) => pt.hex))
+        .filter((h) => !claimed.has(hexKey(h)));
       if (available.length > 0) {
         const pick = available[Math.floor(rng() * available.length)]!;
-        const r = toggleLetterQueue(next, 'opponent', pick);
+        const r = dispatchWorker(next, 'opponent', pick);
         if (r.ok) next = r.world;
       }
     }
-    aiQueueCooldown = AI_QUEUE_BASE + rng() * 2;
-  }
-
-  if (aiSendCooldown <= 0) {
-    if (next.opponent.letterQueue.length > 0) {
-      const r = trySpawnWorker(next, 'opponent');
-      if (r.ok) next = r.world;
-    }
-    aiSendCooldown = AI_SEND_BASE + rng() * 3;
+    aiWorkerCooldown = AI_WORKER_BASE + rng() * 3;
   }
 
   if (aiPlaceCooldown <= 0) {
@@ -1098,35 +1548,23 @@ const tickDummyAi = (world: World, dt: number, rng: () => number): World => {
   }
 
   if (aiCarpenterCooldown <= 0) {
-    // Queue an eligible inactive tile and dispatch a carpenter when honey allows.
+    // Dispatch a carpenter to one eligible frontier-or-inactive hex when
+    // honey allows it and no other carpenter is in flight.
     const ai = next.opponent;
     const pending = ai.bees.some(
-      (b) => b.kind === 'carpenter' || b.state.kind === 'carpenter-flying',
+      (b) => b.state.kind === 'carpenter-flying' || b.state.kind === 'carpenter-returning',
     );
-    if (!pending) {
-      const eligible = ai.tiles.filter(
-        (t) =>
-          t.state === 'inactive' &&
-          neighbors(t.hex).some((n) => {
-            const nb = ai.tiles.find((tt) => hexEquals(tt.hex, n));
-            return (
-              !!nb &&
-              (nb.state === 'active' || nb.state === 'letter' || nb.state === 'capped')
-            );
-          }) &&
-          !ai.carpenterQueue.some((q) => hexEquals(q, t.hex)),
+    if (!pending && ai.honey >= BEE_STATS.carpenter.honeyCost) {
+      const ownedInactive = ai.tiles
+        .filter((t) => t.state === 'inactive')
+        .map((t) => t.hex);
+      const candidates = [...ownedInactive, ...frontierFor(ai)].filter((h) =>
+        isCarpenterEligible(ai, h),
       );
-      if (eligible.length > 0) {
-        const pick = eligible[Math.floor(rng() * eligible.length)]!;
-        const r = toggleCarpenterTarget(next, 'opponent', pick.hex);
+      if (candidates.length > 0) {
+        const pick = candidates[Math.floor(rng() * candidates.length)]!;
+        const r = dispatchCarpenter(next, 'opponent', pick);
         if (r.ok) next = r.world;
-      }
-      if (
-        next.opponent.carpenterQueue.length > 0 &&
-        next.opponent.honey >= BEE_STATS.carpenter.honeyCost
-      ) {
-        const sr = trySpawnCarpenter(next, 'opponent');
-        if (sr.ok) next = sr.world;
       }
     }
     aiCarpenterCooldown = AI_CARPENTER_BASE + rng() * 6;
@@ -1134,8 +1572,7 @@ const tickDummyAi = (world: World, dt: number, rng: () => number): World => {
 
   return {
     ...next,
-    aiQueueCooldown,
-    aiSendCooldown,
+    aiWorkerCooldown,
     aiPlaceCooldown,
     aiPhantomCooldown,
     aiCarpenterCooldown,

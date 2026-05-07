@@ -326,18 +326,16 @@ hivemind/
 1. **M1 — Skeleton** _(done)_: workspace scaffolding, three-panel layout, hex grid renders, Zustand store wired, jest passes.
 2. **M2 — Solo loop** _(done)_: flower spawning + regrow, hive tile + 6 storage slots + ring-2 active tiles + panel-side UI (queue, SEND WORKER, word builder), per-player letter queue with first-bee-wins races, multi-phase worker bees (hive→flower→hive→…) delivering into storage, drag-from-storage letter placement with pointer-following ghost, drag-to-form-word drone caps, cross-panel bee animations via global overlay, fixed-timestep tick loop, dummy AI.
 3. **M3 — Full mechanics** _(done)_: carpenter bees with build queue (tap frontier → SEND CARPENTER, capacity 2 per flight) for unbounded hive expansion, drone supports up to 2 word paths per flight with chain ×1.5 bonus when paths share a tile, capped tiles are reusable branch points (drafts walk through `letter` and `capped`), async dictionary validation against dictionaryapi.dev with per-session cache and ✓/✗/`…` UI on the word builder, AI also dispatches carpenters to grow its hive. Special tiles deferred to M4.
-4. **M3.5 — Honey-only economy** _(done)_: HP and score variables removed; honey is the sole resource. Regen scales with owned hex count; cap scales with empty active tiles; word caps pay honey bonuses (clamped to cap). Win condition reduced to "highest honey at timer end, tiebreak by hive size" — no instant-loss.
-5. **M4 — Feel & balance**: GSAP timelines for bee flight + chain reveal, special bonus tiles (double-letter / triple-word), polish neon styling, scanline overlay, sound.
-6. **M5 — CPU**: easy/medium/hard AI replacing the M3 dummy.
-7. **M6 — Multiplayer**: ws server, lobby, authoritative ticks, reconciliation.
-8. **M7 — Polish**: balance pass, accessibility (keyboard-only play), settings, tutorial.
+4. **M3.5 — Honey-only economy** _(done)_: HP and score variables removed; honey is the sole resource. Regen scales with owned hex count; cap scales with empty active tiles; word caps pay honey bonuses (clamped to cap).
+5. **M4 - Queen mechanic _(done)_: Added queen that can spawn and attack enemy hive. Win condition is queen touching enemy hive.
+7. **M5 — Multiplayer**: ws server, lobby, authoritative ticks, reconciliation.
+6. **M6 — CPU**: easy/medium/hard AI replacing the M3 dummy.
+8. **M7 — Polish**:  GSAP timelines for bee flight + chain reveal, special bonus tiles (double-letter / triple-word), polish neon styling, scanline overlay, sound.
 
 ---
 
 ## 16. Open questions
 
 - **Sound design**: tracker/chiptune library or hand-rolled WebAudio?
-- **Mobile-first vs desktop-first**: swipe is great on touch, but neon CRT vibes scream desktop. Plan covers both, but which gets polish priority?
-- **Special bonus tiles**: introduce in M3 or save for post-launch balance?
 - **Account/persistence**: any progression (cosmetic hives, bee skins) or strictly arcade single-session?
 - **Spectator mode**: trivial to add given authoritative server — desirable?

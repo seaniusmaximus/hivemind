@@ -1,4 +1,4 @@
-import type { GameSnapshot } from '@hivemind/shared';
+import type { WorldSnapshot } from '@hivemind/shared';
 
 export type Difficulty = 'easy' | 'medium' | 'hard';
 
@@ -9,7 +9,7 @@ export type Difficulty = 'easy' | 'medium' | 'hard';
  * - use a trie of common 3-7 letter words to plan placements + chains
  */
 export interface CpuOpponent {
-  step: (snapshot: GameSnapshot, dt: number) => void;
+  step: (snapshot: WorldSnapshot, dt: number) => void;
 }
 
 export const createCpuOpponent = (difficulty: Difficulty): CpuOpponent => {

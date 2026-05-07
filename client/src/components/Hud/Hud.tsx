@@ -1,4 +1,4 @@
-import { honeyCapFor } from '../../game/engine/state.js';
+import { honeyCapFor } from '@hivemind/shared';
 import { useGameStore } from '../../state/gameStore.js';
 import { ActivityFeed } from './ActivityFeed.js';
 
@@ -30,6 +30,9 @@ export const Hud = () => {
   const self = useGameStore((s) => s.world.self);
   const opponent = useGameStore((s) => s.world.opponent);
   const t = useGameStore((s) => s.world.t);
+  const mode = useGameStore((s) => s.mode);
+  const enterLobby = useGameStore((s) => s.enterLobby);
+  const leaveLobby = useGameStore((s) => s.leaveLobby);
 
   const remaining = 5 * 60 - t;
   const selfCap = honeyCapFor(self);
@@ -39,6 +42,25 @@ export const Hud = () => {
     <header className="hud">
       <div className="hud-cluster">
         <Stat label="HONEY" value={formatHoney(self.honey, selfCap)} accent="honey" />
+        {mode === 'solo' ? (
+          <button
+            type="button"
+            className="hud-net-button"
+            onClick={() => enterLobby()}
+            aria-label="open multiplayer lobby"
+          >
+            ONLINE
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="hud-net-button hud-net-button-active"
+            onClick={() => leaveLobby()}
+            aria-label="leave multiplayer"
+          >
+            LEAVE
+          </button>
+        )}
       </div>
 
       <div className="hud-center">

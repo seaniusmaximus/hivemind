@@ -45,10 +45,10 @@ export const WordBuilderPanel = () => {
   return (
     <div className="word-panel">
       <h3 className="word-title">
-        WORDS <span className="queue-count">{drafts.length}/{cap}</span>
+        WORDS <span className="word-count">{drafts.length}/{cap}</span>
       </h3>
       {drafts.length === 0 ? (
-        <p className="queue-empty">drag across letter or capped tiles to draft a word</p>
+        <p className="word-empty">drag across letter or capped tiles to draft a word</p>
       ) : (
         <ol className="word-list">
           {words.map((word, idx) => {

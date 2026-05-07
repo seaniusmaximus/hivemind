@@ -1,21 +1,22 @@
-import { hex, hexEquals, HIVE, makeRng, type Petal } from '@hivemind/shared';
+import { hex, hexEquals } from '../hex.js';
+import { HIVE } from '../bees.js';
+import { makeRng } from '../letters.js';
+import type { Petal } from '../messages.js';
 import {
+  applyCommand,
   buildInitialWorld,
+  dispatchCarpenter,
+  dispatchWorker,
   frontierFor,
   honeyCapFor,
   honeyRateFor,
   petalAt,
   placeLetter,
-  toggleCarpenterTarget,
-  toggleLetterQueue,
-  trySpawnCarpenter,
-  trySpawnWorker,
   trySubmitWord,
   tickWorld,
-  CARPENTER_QUEUE_CAP,
+  worldToSnapshot,
   PATCH_LIFETIME_SECONDS,
   PATCH_TARGET_COUNT,
-  QUEUE_CAP,
   ROUND_DURATION_SECONDS,
   type World,
 } from './state.js';
@@ -51,8 +52,7 @@ describe('engine: world construction', () => {
     expect(w.self.tiles.filter((t) => t.state === 'inactive')).toHaveLength(0);
     expect(w.self.tiles.every((t) => t.state !== 'storage' || t.letter === null)).toBe(true);
     expect(w.patches.length).toBe(PATCH_TARGET_COUNT);
-    expect(w.self.letterQueue).toEqual([]);
-    expect(w.self.carpenterQueue).toEqual([]);
+    expect(w.self.bees).toEqual([]);
     // Frontier is the immediate ring outside the active radius — 18 hexes.
     expect(frontierFor(w.self)).toHaveLength(18);
   });
@@ -66,14 +66,16 @@ describe('engine: honey economy', () => {
     expect(honeyRateFor(w.opponent)).toBeCloseTo(expected);
   });
 
-  test('cap formula = capBase + capPerEmptyTile × emptyActiveCount', () => {
+  test('cap formula = hiveStorage + count(non-storage non-hive tiles)', () => {
     const w = buildInitialWorld(fixedRng());
-    const empties = w.self.tiles.filter((t) => t.state === 'active' && !t.letter).length;
-    expect(empties).toBe(12);
-    expect(honeyCapFor(w.self)).toBe(HIVE.capBase + HIVE.capPerEmptyTile * empties);
+    const honeycomb = w.self.tiles.filter(
+      (t) => t.state !== 'storage' && t.state !== 'hive',
+    ).length;
+    expect(honeycomb).toBe(12);
+    expect(honeyCapFor(w.self)).toBe(HIVE.hiveStorage + honeycomb);
   });
 
-  test('placing a letter (active → letter) lowers the cap by capPerEmptyTile', () => {
+  test('placing a letter (active → letter) does not change the cap', () => {
     const w0 = buildInitialWorld(fixedRng());
     const before = honeyCapFor(w0.self);
     const target = w0.self.tiles.find((t) => t.state === 'active')!;
@@ -86,7 +88,7 @@ describe('engine: honey economy', () => {
         ),
       },
     };
-    expect(honeyCapFor(w1.self)).toBe(before - HIVE.capPerEmptyTile);
+    expect(honeyCapFor(w1.self)).toBe(before);
   });
 
   test('passive regen accrues over time, clamped at the per-player cap', () => {
@@ -192,59 +194,50 @@ describe('engine: flower patches', () => {
     expect(replaced).toBe(true);
     expect(after.patches.length).toBe(PATCH_TARGET_COUNT);
   });
-});
 
-describe('engine: toggleLetterQueue', () => {
-  test('adds and removes a petal hex', () => {
-    const w0 = buildInitialWorld(fixedRng());
-    const petal = firstPetal(w0);
-    const r1 = toggleLetterQueue(w0, 'self', petal.hex);
-    expect(r1.ok).toBe(true);
-    if (!r1.ok) return;
-    expect(r1.world.self.letterQueue).toHaveLength(1);
-    const r2 = toggleLetterQueue(r1.world, 'self', petal.hex);
-    expect(r2.ok).toBe(true);
-    if (!r2.ok) return;
-    expect(r2.world.self.letterQueue).toHaveLength(0);
+  test('initial spawn always has exactly one vowel, one common, one rare', () => {
+    // Try several seeds so we know the invariant is structural, not a fluke
+    // of one RNG path.
+    for (const seed of [1, 7, 42, 1234, 99999]) {
+      const w = buildInitialWorld(makeRng(seed));
+      const types = w.patches.map((p) => p.type).sort();
+      expect(types).toEqual(['common', 'rare', 'vowel']);
+    }
   });
 
-  test('rejects when there is no petal at the chosen hex', () => {
+  test('field maintains 1-of-each-type across full lifetime turnover', () => {
+    const rng = makeRng(7);
+    let w = buildInitialWorld(rng);
+    // Sample the field type distribution at many points across two full
+    // lifetimes — every sample should have exactly one of each type.
+    const samples = 24;
+    for (let i = 0; i < samples; i++) {
+      w = advance(w, (PATCH_LIFETIME_SECONDS * 2) / samples, rng);
+      // Patches may briefly drop below 3 during the respawn cooldown; when
+      // the count is full, every type must be represented.
+      if (w.patches.length === 3) {
+        const types = w.patches.map((p) => p.type).sort();
+        expect(types).toEqual(['common', 'rare', 'vowel']);
+      } else {
+        // Even mid-cooldown, no two patches of the same type should exist.
+        const types = w.patches.map((p) => p.type);
+        expect(new Set(types).size).toBe(types.length);
+      }
+    }
+  });
+});
+
+describe('engine: dispatchWorker', () => {
+  test('rejects when the target hex has no petal', () => {
     const w = buildInitialWorld(fixedRng());
     const empty = hex(99, -99);
-    const r = toggleLetterQueue(w, 'self', empty);
+    const r = dispatchWorker(w, 'self', empty);
     expect(r.ok).toBe(false);
   });
 
-  test('rejects beyond capacity', () => {
+  test('rejects when storage is full', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
-    const allPetals = w.patches.flatMap((p) => p.petals);
-    expect(allPetals.length).toBeGreaterThanOrEqual(QUEUE_CAP + 1);
-    for (let i = 0; i < QUEUE_CAP; i++) {
-      const r = toggleLetterQueue(w, 'self', allPetals[i]!.hex);
-      expect(r.ok).toBe(true);
-      if (r.ok) w = r.world;
-    }
-    const overflow = toggleLetterQueue(w, 'self', allPetals[QUEUE_CAP]!.hex);
-    expect(overflow.ok).toBe(false);
-  });
-});
-
-describe('engine: trySpawnWorker', () => {
-  test('refuses with empty queue', () => {
-    const w = buildInitialWorld(fixedRng());
-    const r = trySpawnWorker(w, 'self');
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toMatch(/letters/);
-  });
-
-  test('refuses when storage is full', () => {
-    const rng = fixedRng();
-    let w = buildInitialWorld(rng);
-    const petal = firstPetal(w);
-    const t = toggleLetterQueue(w, 'self', petal.hex);
-    if (!t.ok) throw new Error('toggle failed');
-    w = t.world;
     w = {
       ...w,
       self: {
@@ -254,27 +247,36 @@ describe('engine: trySpawnWorker', () => {
         ),
       },
     };
-    const r = trySpawnWorker(w, 'self');
+    const petal = firstPetal(w);
+    const r = dispatchWorker(w, 'self', petal.hex);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/storage/);
   });
 
-  test('consumes queue, deducts honey, queues a flying-to-flower bee', () => {
-    const rng = fixedRng();
-    let w = buildInitialWorld(rng);
+  test('rejects when the player cannot afford a worker', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const w = { ...w0, self: { ...w0.self, honey: 0 } };
     const petal = firstPetal(w);
-    const t = toggleLetterQueue(w, 'self', petal.hex);
-    expect(t.ok).toBe(true);
-    if (!t.ok) return;
-    w = t.world;
-    const r = trySpawnWorker(w, 'self');
+    const r = dispatchWorker(w, 'self', petal.hex);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/honey/);
+  });
+
+  test('deducts honey and queues a single-trip flying-to-flower bee', () => {
+    const rng = fixedRng();
+    const w = buildInitialWorld(rng);
+    const petal = firstPetal(w);
+    const r = dispatchWorker(w, 'self', petal.hex);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.world.self.honey).toBeLessThan(w.self.honey);
-    expect(r.world.self.letterQueue).toEqual([]);
     const bee = r.world.self.bees[0]!;
     expect(bee.kind).toBe('worker');
     expect(bee.state.kind).toBe('worker-flying-to-flower');
+    if (bee.state.kind === 'worker-flying-to-flower') {
+      expect(bee.state.target).toEqual(petal.hex);
+      expect(bee.state.queue).toEqual([]);
+    }
   });
 });
 
@@ -285,12 +287,9 @@ describe('engine: worker round trip → letter ends up in storage', () => {
     const petal = firstPetal(w);
     const targetLetter = petal.letter;
 
-    const t = toggleLetterQueue(w, 'self', petal.hex);
-    if (!t.ok) throw new Error('queue toggle failed');
-    w = t.world;
-    const s = trySpawnWorker(w, 'self');
-    if (!s.ok) throw new Error('spawn failed');
-    w = s.world;
+    const r = dispatchWorker(w, 'self', petal.hex);
+    if (!r.ok) throw new Error('dispatch failed');
+    w = r.world;
 
     const after = advance(w, 4.0, rng);
     expect(petalAt(after.patches, petal.hex)).toBeNull();
@@ -309,12 +308,6 @@ describe('engine: race for the same petal', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
     const petal = firstPetal(w);
-    const t1 = toggleLetterQueue(w, 'self', petal.hex);
-    if (!t1.ok) throw new Error('toggle 1 failed');
-    w = t1.world;
-    const t2 = toggleLetterQueue(w, 'opponent', petal.hex);
-    if (!t2.ok) throw new Error('toggle 2 failed');
-    w = t2.world;
 
     w = {
       ...w,
@@ -322,10 +315,10 @@ describe('engine: race for the same petal', () => {
       opponent: { ...w.opponent, honey: 20 },
     };
 
-    const s1 = trySpawnWorker(w, 'self');
+    const s1 = dispatchWorker(w, 'self', petal.hex);
     if (!s1.ok) throw new Error('self spawn failed');
     w = s1.world;
-    const s2 = trySpawnWorker(w, 'opponent');
+    const s2 = dispatchWorker(w, 'opponent', petal.hex);
     if (!s2.ok) throw new Error('opp spawn failed');
     w = s2.world;
 
@@ -523,53 +516,96 @@ describe('engine: branches reuse capped tiles', () => {
   });
 });
 
-describe('engine: carpenter queue + frontier expansion', () => {
-  test('toggleCarpenterTarget accepts a frontier hex adjacent to active, rejects others', () => {
+describe('engine: word submission replay rules', () => {
+  test('accepts more paths than drone capacity in one submit', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const p1 = [hex(0, -2), hex(1, -2)] as const;
+    const p2 = [hex(1, -2), hex(2, -2)] as const;
+    const p3 = [hex(-2, 0), hex(-1, -1)] as const;
+    const p4 = [hex(-2, 2), hex(-1, 1)] as const;
+    w = {
+      ...w,
+      self: {
+        ...w.self,
+        honey: 50,
+        tiles: w.self.tiles.map((t) => {
+          if (hexEquals(t.hex, p1[0])) return { ...t, state: 'letter', letter: 'A' };
+          if (hexEquals(t.hex, p1[1])) return { ...t, state: 'letter', letter: 'T' };
+          if (hexEquals(t.hex, p2[1])) return { ...t, state: 'letter', letter: 'E' };
+          if (hexEquals(t.hex, p3[0])) return { ...t, state: 'letter', letter: 'B' };
+          if (hexEquals(t.hex, p3[1])) return { ...t, state: 'letter', letter: 'E' };
+          if (hexEquals(t.hex, p4[0])) return { ...t, state: 'letter', letter: 'N' };
+          if (hexEquals(t.hex, p4[1])) return { ...t, state: 'letter', letter: 'O' };
+          return t;
+        }),
+      },
+    };
+    const submit = trySubmitWord(w, 'self', [p1, p2, p3, p4]);
+    expect(submit.ok).toBe(true);
+  });
+
+  test('rejects replaying the exact same word on the same hex letters', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const path = [hex(0, -2), hex(1, -2), hex(2, -2)] as const;
+    w = {
+      ...w,
+      self: {
+        ...w.self,
+        honey: 30,
+        tiles: w.self.tiles.map((t) => {
+          if (hexEquals(t.hex, path[0])) return { ...t, state: 'letter', letter: 'C' };
+          if (hexEquals(t.hex, path[1])) return { ...t, state: 'letter', letter: 'A' };
+          if (hexEquals(t.hex, path[2])) return { ...t, state: 'letter', letter: 'T' };
+          return t;
+        }),
+      },
+    };
+    const first = trySubmitWord(w, 'self', [path]);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = trySubmitWord(first.world, 'self', [path]);
+    expect(second.ok).toBe(false);
+    if (!second.ok) {
+      expect(second.reason).toMatch(/already used/i);
+    }
+  });
+});
+
+describe('engine: dispatchCarpenter + frontier expansion', () => {
+  test('accepts a frontier hex adjacent to active, rejects others', () => {
     const w0 = buildInitialWorld(fixedRng());
     // (3,-3) sits on the immediate frontier outside the ring-2 active tiles.
-    const frontier = hex(3, -3);
-    const r1 = toggleCarpenterTarget(w0, 'self', frontier);
+    const r1 = dispatchCarpenter(w0, 'self', hex(3, -3));
     expect(r1.ok).toBe(true);
-    if (!r1.ok) return;
-    expect(r1.world.self.carpenterQueue).toHaveLength(1);
 
     // A storage hex (ring 1) is owned but not eligible.
     const storage = w0.self.tiles.find((t) => t.state === 'storage')!.hex;
-    const bad = toggleCarpenterTarget(w0, 'self', storage);
+    const bad = dispatchCarpenter(w0, 'self', storage);
     expect(bad.ok).toBe(false);
 
     // A hex far away (not touching the hive) is also not eligible.
     const farAway = hex(10, -10);
-    const bad2 = toggleCarpenterTarget(w0, 'self', farAway);
+    const bad2 = dispatchCarpenter(w0, 'self', farAway);
     expect(bad2.ok).toBe(false);
   });
 
-  test('rejects beyond carpenter capacity', () => {
-    let w = buildInitialWorld(fixedRng());
-    const frontierHexes = frontierFor(w.self).slice(0, CARPENTER_QUEUE_CAP);
-    expect(frontierHexes.length).toBe(CARPENTER_QUEUE_CAP);
-    for (const h of frontierHexes) {
-      const r = toggleCarpenterTarget(w, 'self', h);
-      expect(r.ok).toBe(true);
-      if (r.ok) w = r.world;
-    }
-    const overflow = frontierFor(w.self).find(
-      (h) => !w.self.carpenterQueue.some((q) => hexEquals(q, h)),
-    )!;
-    const r = toggleCarpenterTarget(w, 'self', overflow);
+  test('refuses when the player cannot afford a carpenter', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const w = { ...w0, self: { ...w0.self, honey: 0 } };
+    const r = dispatchCarpenter(w, 'self', hex(3, -3));
     expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/honey/);
   });
 
-  test('carpenter bee activates a queued frontier hex (appending a new tile)', () => {
+  test('carpenter bee activates the targeted frontier hex (appending a new tile)', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
     w = { ...w, self: { ...w.self, honey: 20 } };
     const target = hex(3, -3);
     const tilesBefore = w.self.tiles.length;
-    const t = toggleCarpenterTarget(w, 'self', target);
-    if (!t.ok) throw new Error('toggle failed');
-    w = t.world;
-    const s = trySpawnCarpenter(w, 'self');
+    const s = dispatchCarpenter(w, 'self', target);
     expect(s.ok).toBe(true);
     if (!s.ok) return;
     w = s.world;
@@ -585,22 +621,129 @@ describe('engine: carpenter queue + frontier expansion', () => {
     let w = buildInitialWorld(rng);
     w = { ...w, self: { ...w.self, honey: 100 } };
     // First step: activate (3,-3) at radius 3.
-    const step1 = toggleCarpenterTarget(w, 'self', hex(3, -3));
-    if (!step1.ok) throw new Error('step1 toggle failed');
-    w = step1.world;
-    const sp1 = trySpawnCarpenter(w, 'self');
+    const sp1 = dispatchCarpenter(w, 'self', hex(3, -3));
     if (!sp1.ok) throw new Error('step1 spawn failed');
     w = advance(sp1.world, 4.0, rng);
     expect(w.self.tiles.find((t) => hexEquals(t.hex, hex(3, -3)))?.state).toBe('active');
 
     // Second step: (4,-3) is now on the frontier of (3,-3). Activate it.
     expect(frontierFor(w.self).some((h) => hexEquals(h, hex(4, -3)))).toBe(true);
-    const step2 = toggleCarpenterTarget(w, 'self', hex(4, -3));
-    if (!step2.ok) throw new Error('step2 toggle failed');
-    w = step2.world;
-    const sp2 = trySpawnCarpenter(w, 'self');
+    const sp2 = dispatchCarpenter(w, 'self', hex(4, -3));
     if (!sp2.ok) throw new Error('step2 spawn failed');
     w = advance(sp2.world, 4.0, rng);
     expect(w.self.tiles.find((t) => hexEquals(t.hex, hex(4, -3)))?.state).toBe('active');
+  });
+});
+
+describe('engine: applyCommand routes every gameplay verb', () => {
+  test('dispatchWorker via applyCommand spawns the same bee as the direct call', () => {
+    const rng = fixedRng();
+    const w0 = buildInitialWorld(rng);
+    const petal = firstPetal(w0);
+    const direct = dispatchWorker(w0, 'self', petal.hex);
+    const routed = applyCommand(w0, 'self', { kind: 'dispatchWorker', target: petal.hex });
+    expect(direct.ok).toBe(true);
+    expect(routed.ok).toBe(true);
+    if (!direct.ok || !routed.ok) return;
+    expect(routed.world.self.bees).toHaveLength(direct.world.self.bees.length);
+    expect(routed.world.self.honey).toBeCloseTo(direct.world.self.honey);
+  });
+
+  test('placeLetter and submitWords reach the engine in one call each', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    // Pre-fill a storage slot so placeLetter has something to move.
+    const storage = w.self.tiles.find((t) => t.state === 'storage')!;
+    const active = w.self.tiles.find((t) => t.state === 'active')!;
+    w = {
+      ...w,
+      self: {
+        ...w.self,
+        honey: 30,
+        tiles: w.self.tiles.map((t) =>
+          hexEquals(t.hex, storage.hex) ? { ...t, letter: 'A' as const } : t,
+        ),
+      },
+    };
+    const placed = applyCommand(w, 'self', {
+      kind: 'placeLetter',
+      from: storage.hex,
+      to: active.hex,
+    });
+    expect(placed.ok).toBe(true);
+    if (!placed.ok) return;
+
+    // Now lay out a tiny CAT word in the same world and submit it.
+    const path = [hex(0, -2), hex(1, -2), hex(2, -2)] as const;
+    let w2 = placed.world;
+    w2 = {
+      ...w2,
+      self: {
+        ...w2.self,
+        tiles: w2.self.tiles.map((t) => {
+          if (hexEquals(t.hex, path[0])) return { ...t, state: 'letter', letter: 'C' };
+          if (hexEquals(t.hex, path[1])) return { ...t, state: 'letter', letter: 'A' };
+          if (hexEquals(t.hex, path[2])) return { ...t, state: 'letter', letter: 'T' };
+          return t;
+        }),
+      },
+    };
+    const submit = applyCommand(w2, 'self', { kind: 'submitWords', paths: [path] });
+    expect(submit.ok).toBe(true);
+  });
+});
+
+describe('engine: worldToSnapshot perspective swap', () => {
+  test('viewer="self" mirrors the world directly; viewer="opponent" swaps sides and remaps winner', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    w = { ...w, self: { ...w.self, honey: 17 }, opponent: { ...w.opponent, honey: 4 } };
+
+    const a = worldToSnapshot(w, 'self', 7);
+    expect(a.tick).toBe(7);
+    expect(a.self.honey).toBe(17);
+    expect(a.opponent.honey).toBe(4);
+    expect(a.winner).toBeNull();
+
+    const b = worldToSnapshot(w, 'opponent', 7);
+    expect(b.self.honey).toBe(4);
+    expect(b.opponent.honey).toBe(17);
+    expect(b.winner).toBeNull();
+
+    // After a victory: viewer who matches winner sees `'self'`, the other sees `'opponent'`.
+    const won: World = { ...w, phase: 'over', winner: 'self' };
+    expect(worldToSnapshot(won, 'self', 0).winner).toBe('self');
+    expect(worldToSnapshot(won, 'opponent', 0).winner).toBe('opponent');
+  });
+
+  test('opponent-perspective snapshot flips bee panels: a self-side worker reads as opponent-hive for the joiner', () => {
+    // Spawn a bee on the engine's `self` side. On the wire this player is
+    // the host; the joiner (viewerSide='opponent') should see this bee
+    // emanating from their *opponent* hive, not their own.
+    let w = buildInitialWorld(fixedRng());
+    const petal = firstPetal(w);
+    const dispatched = dispatchWorker(w, 'self', petal.hex);
+    expect(dispatched.ok).toBe(true);
+    if (!dispatched.ok) return;
+    w = dispatched.world;
+
+    const hostSnap = worldToSnapshot(w, 'self', 0);
+    const joinerSnap = worldToSnapshot(w, 'opponent', 0);
+
+    const hostBee = hostSnap.self.bees[0]!;
+    expect(hostBee.state.kind).toBe('worker-flying-to-flower');
+    if (hostBee.state.kind === 'worker-flying-to-flower') {
+      expect(hostBee.state.flight.from.panel).toBe('self-hive');
+    }
+
+    // From the joiner's perspective the same bee is the *opponent's*: it
+    // lives in `opponent.bees` and its origin panel must be flipped.
+    const joinerBee = joinerSnap.opponent.bees[0]!;
+    expect(joinerBee.state.kind).toBe('worker-flying-to-flower');
+    if (joinerBee.state.kind === 'worker-flying-to-flower') {
+      expect(joinerBee.state.flight.from.panel).toBe('opponent-hive');
+      // The flowers panel is shared and must NOT be flipped.
+      expect(joinerBee.state.flight.to.panel).toBe('flowers');
+    }
   });
 });

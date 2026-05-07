@@ -1,5 +1,5 @@
 import { HiveGrid } from '../HiveGrid/HiveGrid.js';
-import { QueuePanel } from './QueuePanel.js';
+import { ControlsPanel } from './ControlsPanel.js';
 import { WordBuilderPanel } from './WordBuilderPanel.js';
 
 /**
@@ -12,7 +12,7 @@ export const PlayerPanel = () => {
   return (
     <div className="player-panel">
       <aside className="player-panel-side player-panel-left">
-        <QueuePanel />
+        <ControlsPanel />
       </aside>
       <div className="player-panel-grid">
         <HiveGrid side="self" />
