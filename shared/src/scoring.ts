@@ -17,6 +17,9 @@ export const wordScore = (word: readonly Letter[]): number => {
 /**
  * Score for a chain — multiple words capped on the same drone flight that
  * share at least one letter. Caller is expected to have validated the chain.
+ *
+ * The result is the honey bonus paid out at the moment the drone caps the
+ * word(s); honey is the only currency in the game.
  */
 export const chainScore = (words: readonly (readonly Letter[])[]): number => {
   if (words.length === 0) return 0;
@@ -24,6 +27,3 @@ export const chainScore = (words: readonly (readonly Letter[])[]): number => {
   if (words.length === 1) return total;
   return Math.round(total * 1.5);
 };
-
-/** HP damage dealt to the opponent for a given (chain) score. */
-export const damageFor = (score: number): number => Math.floor(score / 4);

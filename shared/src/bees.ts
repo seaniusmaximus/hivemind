@@ -17,12 +17,29 @@ export const BEE_STATS: Readonly<Record<BeeKind, BeeStats>> = {
   drone: { capacity: 2, honeyCost: 7, flightSeconds: 1.6 },
 };
 
-/** Hive economy constants. */
+/**
+ * Hive economy constants.
+ *
+ * Honey is the only resource. It is generated passively at a rate
+ * proportional to your hive size, and stored up to a cap that scales with
+ * how many *empty* active tiles you have (room in the comb). Word caps and
+ * chains pay out additional honey on top.
+ *
+ * - `regenPerHex` is multiplied by the total number of owned hex tiles
+ *   (hive + storage + active + letter + capped) to get your per-second rate.
+ * - `capBase + capPerEmptyTile * emptyActiveCount` gives your honey ceiling.
+ *   Filling tiles with letters reduces your headroom; growing the hive with
+ *   carpenters raises both your rate and (when the new tile is empty) your
+ *   cap.
+ */
 export const HIVE = {
   startingHoney: 5,
-  maxHoney: 20,
-  honeyPerSecond: 1,
-  startingHp: 100,
+  /** Honey regenerated per second, per owned hex tile. */
+  regenPerHex: 0.04,
+  /** Baseline honey storage cap (independent of hive size). */
+  capBase: 10,
+  /** Additional cap room contributed by each empty active tile. */
+  capPerEmptyTile: 2,
 } as const;
 
 /** Per-segment flight times (seconds). */

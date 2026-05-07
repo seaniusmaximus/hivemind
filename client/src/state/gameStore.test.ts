@@ -10,7 +10,9 @@ describe('gameStore', () => {
     const { world } = useGameStore.getState();
     expect(world.self.id).toBe('self');
     expect(world.opponent.id).toBe('opponent');
-    expect(world.self.hp).toBe(100);
+    // Honey is the only resource; both sides start with the configured stash.
+    expect(world.self.honey).toBeGreaterThan(0);
+    expect(world.opponent.honey).toBeGreaterThan(0);
     expect(world.patches.length).toBeGreaterThan(0);
     expect(world.self.letterQueue).toEqual([]);
     expect(world.self.carpenterQueue).toEqual([]);
