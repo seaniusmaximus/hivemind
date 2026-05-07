@@ -10,12 +10,17 @@
   // LobbyDO is a singleton (idFromName "singleton") that owns the active-code
   // registry. RoomDO is one instance per room — its DO id is `idFromName(code)`
   // so any client connecting to `/ws/<code>` lands on the right room.
-  "$schema": "node_modules/wrangler/config-schema.json",
+  //
+  // This config lives inside `server/` (not the repo root) so that Cloudflare
+  // Workers Builds — which refuses to "auto-detect" a project at the root of
+  // an npm workspace — can target this folder via its Root Directory setting.
+  // All paths below are relative to this file's location.
+  "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "hivemind",
-  "main": "server/src/worker.ts",
+  "main": "src/worker.ts",
   "compatibility_date": "2025-04-01",
   "assets": {
-    "directory": "./client/dist",
+    "directory": "../client/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application"
   },

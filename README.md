@@ -8,14 +8,16 @@ See [`plans.md`](./plans.md) for the full design doc.
 
 ```
 hivemind/
-├── shared/         shared types, hex math, scoring, message protocol
-├── client/         React 19 + Vite + Zustand + GSAP front-end
-├── server/         Cloudflare Worker + Durable Objects (LobbyDO + RoomDO)
-├── wrangler.jsonc  Cloudflare deployment config (Worker, DOs, [assets])
-└── jest.config.cjs multi-project test runner
+├── shared/             shared types, hex math, scoring, message protocol
+├── client/             React 19 + Vite + Zustand + GSAP front-end
+├── server/             Cloudflare Worker + Durable Objects (LobbyDO + RoomDO)
+│   └── wrangler.jsonc  Cloudflare deployment config (Worker, DOs, [assets])
+└── jest.config.cjs     multi-project test runner
 ```
 
-Managed with npm workspaces.
+Managed with npm workspaces. `wrangler.jsonc` lives inside `server/` so
+Cloudflare Workers Builds can target it as a single project — the build
+runs from the repo root via `npm --prefix ..` indirection.
 
 ## Prerequisites
 
@@ -62,13 +64,20 @@ The whole stack runs on a single Cloudflare Worker:
 2. Push this repo to GitHub.
 3. In the Cloudflare dashboard, go to **Workers & Pages → Create → Connect to Git**,
    pick the repo, and configure:
-   - Build command: `npm install && npm run build:shared && npm run build:client`
-   - Deploy command: `npx wrangler deploy`
+   - **Root directory**: `server` (this is required — Cloudflare's build
+     auto-detection refuses to run from the root of an npm workspace, so we
+     point it at the worker's subfolder where `wrangler.jsonc` lives).
+   - **Build command**:
+     `npm --prefix .. install && npm --prefix .. run build:shared && npm --prefix .. run build:client`
+     The `--prefix ..` indirection makes npm install and run scripts from the
+     actual repo root (where the `workspaces` field is defined) while the
+     build command itself executes from `server/`.
+   - **Deploy command**: `npx wrangler deploy` (resolves `./wrangler.jsonc`
+     in `server/` automatically).
    - Production branch: `main`
 
    (The `build:server` step only runs `tsc -b` for type-checking — Wrangler
-   bundles `server/src/worker.ts` itself, so it's not strictly needed for
-   deploy. Including it catches type errors before the deploy command runs.)
+   bundles `src/worker.ts` itself, so it's not strictly needed for deploy.)
 
 That's it. Pushes to `main` deploy automatically; PRs get preview URLs.
 
