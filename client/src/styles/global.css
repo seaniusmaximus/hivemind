@@ -896,3 +896,26 @@ button.ghost {
   margin: 0;
   font-size: 1.4rem;
 }
+
+.game-over-tally {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: 100%;
+  font-family: 'Press Start 2P', system-ui, sans-serif;
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+}
+
+.game-over-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid rgba(255, 43, 214, 0.35);
+  background: rgba(11, 4, 32, 0.6);
+  color: var(--honey);
+}
+
+.game-over-row span:first-child {
+  color: var(--text-dim);
+}

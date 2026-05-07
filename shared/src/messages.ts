@@ -90,9 +90,9 @@ export interface GameSnapshot {
 
 export interface PlayerState {
   readonly id: string;
+  /** The only player resource. Spent on bees and word caps; honey at the
+   *  round timer is the win metric (tiebreak: hive size). */
   readonly honey: number;
-  readonly hp: number;
-  readonly score: number;
   readonly tiles: readonly TileSnapshot[];
   readonly bees: readonly Bee[];
   /** Flower hexes selected by this player, in selection order. Consumed by SEND WORKER. */

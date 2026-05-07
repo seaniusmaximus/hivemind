@@ -38,13 +38,17 @@ A retro-arcade word game where you command a hive of bees to harvest letters fro
 ## 3. Domain model
 
 ```
-Hive          central immortal hex tile per player; HP/honey reservoir
+Hive          central immortal hex tile per player; honey reservoir + bee launch pad
 Hex tile      pointy-top hex on a player grid; states: inactive | active | letter | capped
 Letter tile   active hex holding a letter glyph + Scrabble point value
 Capped tile   a letter that has been included in a submitted (validated) word
 Flower        hex in the central field carrying a letter; despawns when picked
 Bee           transient unit dispatched from a hive; types below
 ```
+
+**Honey is the only resource and the only score.** There is no HP and no
+separate score variable; the size of your honey pool *is* your standing in
+the match.
 
 ### Bee types
 
@@ -100,10 +104,11 @@ Mouse: drag to swipe. Touch: native swipe. Keyboard: `1/2/3` or `←/→`.
 
 **Real-time with cooldowns.** Matches the arcade feel and keeps both players engaged. Every action goes through the bee economy:
 
-1. Hive passively generates **honey** at +1/sec, capped at 20.
-2. Spend honey to spawn bees (see costs above).
-3. Issue an order (target flower / target tile / target word) — bee animates 1.0–1.8s flight.
-4. Effects resolve when the bee lands.
+1. Hive passively generates **honey** at `regenPerHex` (0.04 / sec) × your owned tile count. A starter hive (19 tiles) trickles in ≈0.76 / sec; a fully expanded hive ticks faster.
+2. Honey is stored up to a per-player **cap** = `capBase (10) + capPerEmptyTile (2) × emptyActiveCount`. Empty active tiles are your *honeycomb* — the more open cells you have, the more honey you can stash. Filling a tile with a letter (or capping it into a word) shrinks your headroom.
+3. Spend honey to spawn bees (see costs above).
+4. Issue an order (target flower / target tile / target word) — bee animates 1.0–1.8s flight.
+5. Effects resolve when the bee lands. Capping a word pays a **honey bonus** equal to the word's score (or `(w1 + w2) × 1.5` for a chain) — clamped to your current cap, so timing matters.
 
 ### Flower patches
 
@@ -152,7 +157,7 @@ If a drone caps multiple words **on the same flight** (capacity 2), and the word
 
 ---
 
-## 6. Scoring
+## 6. Scoring (= honey payouts)
 
 ```
 wordScore = sum(letterValue) · lengthMultiplier
@@ -167,20 +172,26 @@ wordScore = sum(letterValue) · lengthMultiplier
 
 Letter values: standard Scrabble distribution (`shared/src/letters.ts`).
 
-**Chain bonus**: if a drone caps two words that share a letter on one flight, total chain score = `(w1 + w2) · 1.5`.
+`wordScore` is paid out as **honey** when the drone caps the word. There is no separate "score" track.
 
-**Special tiles** *(open)*: occasional double-letter / triple-word hexes spawned on radius 3 to encourage carpenter use.
+**Chain bonus**: if a drone caps two words that share a letter on one flight, total honey = `(w1 + w2) · 1.5`.
+
+Honey from word caps is **clipped at the cap**: spamming words while you're already maxed out wastes the bonus. Keep empty actives (or grow the hive) to widen the ceiling before payday.
+
+**Special tiles** *(open)*: occasional double-letter / triple-word hexes spawned on the frontier to encourage carpenter use.
 
 ---
 
 ## 7. Win condition
 
-Hybrid:
+Pure honey race against the clock:
 
 - **Time limit**: 5-minute round.
-- **Hive HP**: each hive starts at 100 HP. Every successful word deals damage = `floor(wordScore / 4)` to the opponent.
-- **Win**: opponent HP → 0 (instant), or highest score when the timer expires.
-- **Tiebreaker**: most chains played, then longest single word.
+- **Win**: highest honey total when the timer expires.
+- **Tiebreaker 1**: largest hive (most owned tiles).
+- **Tiebreaker 2**: stalemate.
+
+There is no instant-loss mechanic — both hives play out the full round.
 
 ---
 
@@ -192,7 +203,7 @@ Hybrid:
 |      |                                         |  adjacent to active)                   |  + adjacent + a complete word)                       |
 | 2    | Player taps target empty active tile   | Bee flies, lands, hex pulses → active  | Bee flies along the path                            |
 | 3    | Bee flies flower→hive→tile, drops letter|                                        | Each letter caps as bee passes                      |
-| 4    | Capacity decremented; if 0, despawn     | Capacity decremented; if 0, despawn    | Word validated; on success → score; on fail → letters un-cap and tile flashes red |
+| 4    | Capacity decremented; if 0, despawn     | Capacity decremented; if 0, despawn    | Word validated; on success → honey bonus + tiles capped; on fail → letters un-cap and tile flashes red |
 
 Bees queue: while one bee is in flight, you can immediately issue more orders. Multiple bees can be airborne simultaneously.
 
@@ -213,7 +224,7 @@ Bees queue: while one bee is in flight, you can immediately issue more orders. M
 
 - WebSocket server (Node + `ws`).
 - **Lobby**: 6-character room code; first to join is host.
-- **Server-authoritative** for: random seeds, flower spawns, dictionary calls, scoring, HP.
+- **Server-authoritative** for: random seeds, flower spawns, dictionary calls, honey balances + caps.
 - **Client-predictive** for: bee flight visuals, swipe transitions.
 - **Reconciliation**: server snapshots tick at 5Hz; clients reconcile with the latest snapshot.
 
@@ -313,12 +324,13 @@ hivemind/
 ## 15. Milestones
 
 1. **M1 — Skeleton** _(done)_: workspace scaffolding, three-panel layout, hex grid renders, Zustand store wired, jest passes.
-2. **M2 — Solo loop** _(done)_: flower spawning + regrow, hive tile + 6 storage slots + ring-2 active tiles + panel-side UI (queue, SEND WORKER, word builder), per-player letter queue with first-bee-wins races, multi-phase worker bees (hive→flower→hive→…) delivering into storage, drag-from-storage letter placement with pointer-following ghost, drag-to-form-word drone caps (with scoring + HP damage), cross-panel bee animations via global overlay, fixed-timestep tick loop, dummy AI, win condition (HP / timer).
-3. **M3 — Full mechanics** _(done)_: carpenter bees with build queue (tap inactive → SEND CARPENTER, capacity 2 per flight) for ring-3 expansion, drone supports up to 2 word paths per flight with chain ×1.5 bonus when paths share a tile, capped tiles are reusable branch points (drafts walk through `letter` and `capped`), async dictionary validation against dictionaryapi.dev with per-session cache and ✓/✗/`…` UI on the word builder, AI also dispatches carpenters to grow its hive. Special tiles deferred to M4.
-4. **M4 — Feel & balance**: GSAP timelines for bee flight + chain reveal, special bonus tiles (double-letter / triple-word), polish neon styling, scanline overlay, sound.
-15. **M5 — CPU**: easy/medium/hard AI replacing the M3 dummy.
-6. **M6 — Multiplayer**: ws server, lobby, authoritative ticks, reconciliation.
-7. **M7 — Polish**: balance pass, accessibility (keyboard-only play), settings, tutorial.
+2. **M2 — Solo loop** _(done)_: flower spawning + regrow, hive tile + 6 storage slots + ring-2 active tiles + panel-side UI (queue, SEND WORKER, word builder), per-player letter queue with first-bee-wins races, multi-phase worker bees (hive→flower→hive→…) delivering into storage, drag-from-storage letter placement with pointer-following ghost, drag-to-form-word drone caps, cross-panel bee animations via global overlay, fixed-timestep tick loop, dummy AI.
+3. **M3 — Full mechanics** _(done)_: carpenter bees with build queue (tap frontier → SEND CARPENTER, capacity 2 per flight) for unbounded hive expansion, drone supports up to 2 word paths per flight with chain ×1.5 bonus when paths share a tile, capped tiles are reusable branch points (drafts walk through `letter` and `capped`), async dictionary validation against dictionaryapi.dev with per-session cache and ✓/✗/`…` UI on the word builder, AI also dispatches carpenters to grow its hive. Special tiles deferred to M4.
+4. **M3.5 — Honey-only economy** _(done)_: HP and score variables removed; honey is the sole resource. Regen scales with owned hex count; cap scales with empty active tiles; word caps pay honey bonuses (clamped to cap). Win condition reduced to "highest honey at timer end, tiebreak by hive size" — no instant-loss.
+5. **M4 — Feel & balance**: GSAP timelines for bee flight + chain reveal, special bonus tiles (double-letter / triple-word), polish neon styling, scanline overlay, sound.
+6. **M5 — CPU**: easy/medium/hard AI replacing the M3 dummy.
+7. **M6 — Multiplayer**: ws server, lobby, authoritative ticks, reconciliation.
+8. **M7 — Polish**: balance pass, accessibility (keyboard-only play), settings, tutorial.
 
 ---
 

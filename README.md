@@ -46,20 +46,26 @@ Open http://localhost:5173 — the client will boot into a local solo state with
 Tracking against `plans.md` milestones:
 
 - [x] **M1** — Workspace + tooling, hex math + Scrabble bag + scoring, three-panel UI, WS server stub
-- [x] **M2** — Solo loop: fixed-timestep tick, honey regen, flower respawn, worker bees deliver letters, drag-to-form-word drone caps, scoring + HP damage, dummy AI, win condition
+- [x] **M2** — Solo loop: fixed-timestep tick, honey regen, flower respawn, worker bees deliver letters, drag-to-form-word drone caps, dummy AI
 - [x] **M3** — Carpenter bees + build queue, branches through capped tiles, multi-word drone caps with chain ×1.5 bonus, async dictionary validation against dictionaryapi.dev with cached ✓/✗/`…` feedback
+- [x] **M3.5** — Honey-only economy: HP and score variables retired, regen scales with hive size, cap scales with empty active tiles, word caps pay honey bonuses, victory by highest honey at timer end
 - [ ] **M4** — GSAP feel pass, special bonus tiles, sound, animation polish
 - [ ] **M5** — Real CPU AI (easy/medium/hard)
 - [ ] **M6** — Authoritative multiplayer
 - [ ] **M7** — Balance, accessibility, tutorial
 
-## How to play (M3 solo)
+## How to play (M3.5 solo)
 
 - `1` / `2` / `3` (or arrow keys) to switch between your hive, the flower field, and the rival hive.
+- **Honey is the only resource and the only score.**
+  - Your hive trickles in honey at `0.04 / sec × number of owned hex tiles` (~0.76/sec on a fresh hive, faster as you build).
+  - Honey is stored up to a cap of `10 + 2 × emptyActiveTileCount`. Empty active tiles are your honeycomb — placing letters or capping words shrinks your headroom; carpenters can grow it back out.
+  - Every word you cap pays a **honey bonus** equal to the word's score. Two words on one drone flight that share a tile pay `(w1 + w2) × 1.5`. Bonuses are clamped to your current cap, so timing matters — if you're already maxed out you'll lose the spillover.
+- **Win**: highest honey when the 5-minute timer expires. Tiebreak: largest hive. Otherwise stalemate. There is no instant-loss; both hives play out the round.
 - Your hive starts as the central **hive tile** (gold) plus two rings:
   - 6 **storage slots** (dashed amber) at radius 1 — workers deliver fetched letters here. Holds up to 6 letters.
-  - 12 **active tiles** (purple) at radius 2 — empty placement targets.
-  - **Frontier** (dim, dashed-cyan stroke) — every hex touching your active hive is a buildable frontier hex. **There is no hard radius cap** — keep activating tiles to grow outward indefinitely. The grid auto-scales as it grows.
+  - 12 **active tiles** (purple) at radius 2 — empty placement targets and cap headroom.
+  - **Frontier** (dim, dashed-cyan stroke) — every hex touching your active hive is a buildable frontier hex. **There is no hard radius cap** — keep activating tiles to grow outward indefinitely (more regen, more cap, more board space). The grid auto-scales as it grows.
 - The **flower field** holds exactly **3 patches** at all times. Each patch is a six-petal ring around an unused center hex, and is one of three types:
   - **vowel** (pink) — A E I O U. The bottleneck letters; high demand.
   - **common** (cyan) — R S T L N D. Reliable workhorses.
@@ -68,7 +74,7 @@ Tracking against `plans.md` milestones:
 - Tap any **petal** to queue it for your next worker (gold badge = yours, pink badge = the rival's). Tap again to remove. Queue is capped at 5.
 - Press `SEND WORKER` (left side of your hive panel) to spend 3 honey. A bee flies hive → petal → hive → petal → …, dropping each letter into the next empty storage slot. **If a petal is gone when your bee arrives — the rival took it, or it withered — your bee skips it and moves on.**
 - On your hive, **drag a letter out of a storage slot onto an empty active tile** to place it. Empty active tiles glow cyan as drop targets while you drag, and a ghost letter follows your pointer. Once placed, the letter is locked.
-- **Grow your hive**: tap a frontier hex (any dim hex touching your active hive) to add it to the build queue (cap = 2). It gets a numbered cyan badge. Press `SEND CARPENTER` to spend 5 honey on a bee that flies out and activates each queued tile in order — this also expands the frontier outward, so you can keep building.
+- **Grow your hive**: tap a frontier hex (any dim hex touching your active hive) to add it to the build queue (cap = 2). It gets a numbered cyan badge. Press `SEND CARPENTER` to spend 5 honey on a bee that flies out and activates each queued tile in order — this expands both your regen and (while empty) your cap, and pushes the frontier outward.
 - To score, **drag across adjacent placed letters** (and any already-capped tiles, which act as branch points) to draft a word. **Drag a second time** to draft a second word — drone capacity is 2. Drafted words appear in the right panel with a `✓`/`✗`/`…` validation badge as the dictionary lookup resolves.
-- Press `SUBMIT` to spend 7 honey on a drone that caps every valid word. If both words share a tile, you get a **chain ×1.5 bonus** on top of the combined score.
-- A dummy AI on the rival side queues petals, sends workers, places letters, dispatches carpenters to expand its hive, and scores phantom words. It exists only as a moving target; the real AI lands in M5.
+- Press `SUBMIT` to spend 7 honey on a drone that caps every valid word. Each capped word pays its score back to you as honey; chains pay 1.5×.
+- A dummy AI on the rival side queues petals, sends workers, places letters, dispatches carpenters to expand its hive, and scores phantom words for honey. It exists only as a moving target; the real AI lands in M5.

@@ -27,7 +27,6 @@ import {
   FLOWER_LETTER_POOLS,
   HIVE,
   chainScore,
-  damageFor,
   drawFlowerLetter,
   hex,
   hexEquals,
@@ -125,14 +124,31 @@ const buildPlayer = (id: string): PlayerState => {
   return {
     id,
     honey: HIVE.startingHoney,
-    hp: HIVE.startingHp,
-    score: 0,
     tiles,
     bees: [],
     letterQueue: [],
     carpenterQueue: [],
   };
 };
+
+/** Per-second honey regeneration: scales linearly with hive size. */
+export const honeyRateFor = (player: PlayerState): number =>
+  HIVE.regenPerHex * player.tiles.length;
+
+/** Honey storage cap: scales with the count of empty active tiles. */
+export const honeyCapFor = (player: PlayerState): number => {
+  const emptyActives = player.tiles.reduce(
+    (n, t) => n + (t.state === 'active' && !t.letter ? 1 : 0),
+    0,
+  );
+  return HIVE.capBase + HIVE.capPerEmptyTile * emptyActives;
+};
+
+/** Add `bonus` honey to `player`, clamped at their current cap. */
+const grantHoney = (player: PlayerState, bonus: number): PlayerState => ({
+  ...player,
+  honey: Math.min(honeyCapFor(player), player.honey + bonus),
+});
 
 /**
  * The set of hexes the player could activate next: any hex adjacent to one of
@@ -271,7 +287,7 @@ const newId = (): string => {
 
 const tickHoney = (player: PlayerState, dt: number): PlayerState => ({
   ...player,
-  honey: Math.min(HIVE.maxHoney, player.honey + HIVE.honeyPerSecond * dt),
+  honey: Math.min(honeyCapFor(player), player.honey + honeyRateFor(player) * dt),
 });
 
 const flight = (
@@ -361,18 +377,14 @@ const tickPatches = (world: World, dt: number, rng: () => number): World => {
 };
 
 const checkVictory = (world: World): World => {
-  if (world.opponent.hp <= 0) return { ...world, phase: 'over', winner: 'self' };
-  if (world.self.hp <= 0) return { ...world, phase: 'over', winner: 'opponent' };
-  if (world.t >= ROUND_DURATION_SECONDS) {
-    const winner: Side | null =
-      world.self.score === world.opponent.score
-        ? null
-        : world.self.score > world.opponent.score
-          ? 'self'
-          : 'opponent';
-    return { ...world, phase: 'over', winner };
-  }
-  return world;
+  if (world.t < ROUND_DURATION_SECONDS) return world;
+  // Timer expired. Honey decides; ties broken by hive size.
+  let winner: Side | null = null;
+  if (world.self.honey > world.opponent.honey) winner = 'self';
+  else if (world.opponent.honey > world.self.honey) winner = 'opponent';
+  else if (world.self.tiles.length > world.opponent.tiles.length) winner = 'self';
+  else if (world.opponent.tiles.length > world.self.tiles.length) winner = 'opponent';
+  return { ...world, phase: 'over', winner };
 };
 
 // ---- Bee resolution --------------------------------------------------------
@@ -624,27 +636,25 @@ const resolveSideBees = (world: World, side: Side): World => {
           paths.some((p1, i) =>
             paths.some((p2, j) => i < j && p1.some((a) => p2.some((b) => hexEquals(a, b)))),
           );
-        const score = sharesTile ? chainScore(wordsLetters) : wordsLetters.reduce((s, w) => s + wordScore(w), 0);
-        const dmg = damageFor(score);
+        const bonus = sharesTile
+          ? chainScore(wordsLetters)
+          : wordsLetters.reduce((s, w) => s + wordScore(w), 0);
         updatedPlayer = {
           ...updatedPlayer,
-          score: updatedPlayer.score + score,
           tiles: updatedPlayer.tiles.map((t) =>
             allCappedHexes.some((h) => hexEquals(h, t.hex))
               ? { ...t, state: 'capped' }
               : t,
           ),
         };
+        updatedPlayer = grantHoney(updatedPlayer, bonus);
         const summary = wordsLetters.map((w) => w.join('')).join(' + ');
         const tag = sharesTile && wordsLetters.length >= 2 ? ' chain!' : '';
         next = logEvent(next, {
           t: next.t,
           ownerId: player.id,
-          text: `${summary} +${score} pts${tag}`,
+          text: `${summary} +${bonus} 🜨${tag}`,
         });
-        const opp = otherSide(side);
-        const o = next[opp];
-        next = setPlayer(next, opp, { ...o, hp: Math.max(0, o.hp - dmg) });
       }
       beesChanged = true;
       continue;
@@ -1141,21 +1151,13 @@ const simulatePhantomWord = (world: World, rng: () => number): World => {
   for (let i = 0; i < length; i++) {
     letters.push(pool[Math.floor(rng() * pool.length)]!);
   }
-  const score = wordScore(letters);
-  const dmg = damageFor(score);
+  const bonus = wordScore(letters);
   let next = world;
-  next = setPlayer(next, 'opponent', {
-    ...next.opponent,
-    score: next.opponent.score + score,
-  });
-  next = setPlayer(next, 'self', {
-    ...next.self,
-    hp: Math.max(0, next.self.hp - dmg),
-  });
+  next = setPlayer(next, 'opponent', grantHoney(next.opponent, bonus));
   next = logEvent(next, {
     t: next.t,
     ownerId: next.opponent.id,
-    text: `${letters.join('')} +${score} pts`,
+    text: `${letters.join('')} +${bonus} 🜨`,
   });
   return next;
 };

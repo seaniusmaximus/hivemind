@@ -1,4 +1,4 @@
-import { wordScore, chainScore, damageFor, lengthMultiplier } from './scoring.js';
+import { wordScore, chainScore, lengthMultiplier } from './scoring.js';
 import type { Letter } from './letters.js';
 
 const word = (s: string): Letter[] => [...s] as Letter[];
@@ -23,11 +23,5 @@ describe('scoring', () => {
     const cat = wordScore(word('CAT'));
     const dog = wordScore(word('DOG'));
     expect(chainScore([word('CAT'), word('DOG')])).toBe(Math.round((cat + dog) * 1.5));
-  });
-
-  test('damageFor floors score / 4', () => {
-    expect(damageFor(0)).toBe(0);
-    expect(damageFor(7)).toBe(1);
-    expect(damageFor(40)).toBe(10);
   });
 });
