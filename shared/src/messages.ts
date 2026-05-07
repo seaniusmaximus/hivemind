@@ -1,49 +1,127 @@
 import type { Hex } from './hex.js';
 import type { FlowerType, Letter } from './letters.js';
-import type { Bee, BeeKind } from './bees.js';
+import type { Bee } from './bees.js';
+
+/** ----- Engine + wire shared primitives ----- */
+
+/** Which side of the board a player or piece belongs to from one viewer's
+ *  perspective. The server stores both sides absolutely; clients always see
+ *  themselves as `'self'` regardless of who they are in the room. */
+export type Side = 'self' | 'opponent';
+
+/** Engine-local lifecycle. Distinct from the lobby-aware {@link GamePhase}
+ *  below — the engine only cares whether play is ongoing or finished. */
+export type WorldPhase = 'playing' | 'over';
+
+/** Lobby-aware lifecycle for the room as a whole. */
+export type GamePhase = 'lobby' | 'countdown' | 'playing' | 'over';
+
+/** One entry in the engine's rolling activity feed. Purely informational —
+ *  game state is *not* derived from log entries. */
+export interface ActivityEntry {
+  readonly id: string;
+  readonly t: number;
+  readonly ownerId: string;
+  readonly text: string;
+}
 
 /** ----- Client → Server ----- */
 
+/**
+ * The set of gameplay actions a client can request. The server validates each
+ * command against the requesting player's side before applying it; the
+ * authoritative engine then folds the result into the next snapshot.
+ */
+export type GameCommand =
+  | { readonly kind: 'dispatchWorker'; readonly target: Hex }
+  | { readonly kind: 'dispatchCarpenter'; readonly target: Hex }
+  | { readonly kind: 'dispatchQueen' }
+  | { readonly kind: 'placeLetter'; readonly from: Hex; readonly to: Hex }
+  | { readonly kind: 'submitWords'; readonly paths: readonly (readonly Hex[])[] };
+
+/** Discriminator for {@link GameCommand}. Useful for log lines and switches. */
+export type GameCommandKind = GameCommand['kind'];
+
 export type ClientMessage =
-  | { type: 'JOIN_ROOM'; roomCode: string; playerName: string }
   | { type: 'CREATE_ROOM'; playerName: string }
+  | { type: 'JOIN_ROOM'; roomCode: string; playerName: string }
   | { type: 'READY' }
-  | { type: 'SPAWN_BEE'; bee: BeeKind }
+  | { type: 'LEAVE' }
   | {
-      type: 'ASSIGN_BEE_TARGET';
-      beeId: string;
-      target:
-        | { kind: 'flower'; flower: Hex; dropOn: Hex }
-        | { kind: 'tile'; tile: Hex }
-        | { kind: 'word'; path: readonly Hex[] };
-    }
-  | { type: 'LEAVE' };
+      type: 'COMMAND';
+      /** Client-generated request id; echoed back in `COMMAND_RESULT`. */
+      commandId: string;
+      cmd: GameCommand;
+    };
 
 /** ----- Server → Client ----- */
 
 export type ServerMessage =
-  | { type: 'ROOM_STATE'; roomCode: string; players: PlayerSummary[]; phase: GamePhase }
-  | { type: 'GAME_START'; seed: number; opponentId: string; tickRate: number }
-  | { type: 'TICK'; tick: number; snapshot: GameSnapshot }
-  | { type: 'BEE_EVENT'; ownerId: string; bee: Bee }
-  | { type: 'FLOWER_EVENT'; flowers: readonly FlowerSnapshot[] }
+  | { type: 'ROOM_STATE'; roomCode: string; players: readonly PlayerSummary[]; phase: GamePhase }
+  | {
+      type: 'GAME_START';
+      /** This client's player id (perspective: `self` in snapshots). */
+      selfId: string;
+      /** The other player's id (perspective: `opponent` in snapshots). */
+      opponentId: string;
+      /** RNG seed used by the authoritative engine. Clients echo this for
+       *  any client-only random visuals so we don't desync. */
+      seed: number;
+      /** Server snapshot rate in Hz. */
+      tickRate: number;
+      /** Wall-clock ms when the round began. */
+      startedAt: number;
+    }
+  | { type: 'SNAPSHOT'; tick: number; world: WorldSnapshot }
+  | {
+      type: 'COMMAND_RESULT';
+      commandId: string;
+      ok: boolean;
+      /** Present when `ok === false`; matches the engine's CommandResult.reason. */
+      reason?: string;
+    }
   | {
       type: 'WORD_RESULT';
       ownerId: string;
-      words: readonly { letters: readonly Letter[]; valid: boolean }[];
-      score: number;
-      damage: number;
+      /** One entry per drafted path in the original submit, in input order. */
+      words: readonly { readonly letters: readonly Letter[]; readonly valid: boolean }[];
     }
-  | { type: 'GAME_OVER'; winnerId: string | null; reason: 'time' | 'hp' | 'forfeit' }
+  | {
+      type: 'GAME_OVER';
+      winnerId: string | null;
+      reason: 'time' | 'queen' | 'forfeit';
+    }
   | { type: 'ERROR'; code: string; message: string };
-
-export type GamePhase = 'lobby' | 'countdown' | 'playing' | 'over';
 
 export interface PlayerSummary {
   readonly id: string;
   readonly name: string;
   readonly ready: boolean;
 }
+
+/** ----- World snapshot (S → C) ----- */
+
+/**
+ * The portion of the engine `World` that crosses the wire. Solo and
+ * authoritative ticks share the same shape so the renderer doesn't care which
+ * source produced it. AI cooldowns and engine-private bookkeeping are
+ * deliberately excluded.
+ */
+export interface WorldSnapshot {
+  /** Engine seconds since round start. */
+  readonly t: number;
+  /** Server-side monotonic snapshot index (0 in solo). */
+  readonly tick: number;
+  readonly phase: WorldPhase;
+  /** From the receiver's perspective. `'self'` means the receiver won. */
+  readonly winner: Side | null;
+  readonly self: PlayerState;
+  readonly opponent: PlayerState;
+  readonly patches: readonly FlowerPatch[];
+  readonly log: readonly ActivityEntry[];
+}
+
+/** ----- Flower field ----- */
 
 /**
  * One pickable letter on the field. A petal lives on a single hex inside a
@@ -80,13 +158,7 @@ export interface FlowerSnapshot {
   readonly patchId: string;
 }
 
-export interface GameSnapshot {
-  readonly tick: number;
-  readonly time: number;
-  readonly self: PlayerState;
-  readonly opponent: PlayerState;
-  readonly patches: readonly FlowerPatch[];
-}
+/** ----- Player state ----- */
 
 export interface PlayerState {
   readonly id: string;
@@ -94,11 +166,19 @@ export interface PlayerState {
    *  round timer is the win metric (tiebreak: hive size). */
   readonly honey: number;
   readonly tiles: readonly TileSnapshot[];
+  readonly freedLetters?: readonly FreedLetter[];
   readonly bees: readonly Bee[];
-  /** Flower hexes selected by this player, in selection order. Consumed by SEND WORKER. */
-  readonly letterQueue: readonly Hex[];
-  /** Inactive tile hexes selected for activation. Consumed by SEND CARPENTER. */
-  readonly carpenterQueue: readonly Hex[];
+  /** Signatures for already-submitted word+hex patterns to prevent replaying
+   *  the exact same word with the exact same tile letters. */
+  readonly usedWordSignatures: readonly string[];
+}
+
+export interface FreedLetter {
+  readonly id: string;
+  readonly hex: Hex;
+  readonly letter: Letter;
+  readonly spawnedAt: number;
+  readonly witherAt: number;
 }
 
 export interface TileSnapshot {
@@ -121,4 +201,12 @@ export interface TileSnapshot {
    */
   readonly state: 'hive' | 'storage' | 'inactive' | 'active' | 'letter' | 'capped';
   readonly letter: Letter | null;
+  /** Damage dealt by queen attacks. Tile is destroyed when this reaches HP. */
+  readonly damage?: number;
+  /**
+   * Number of times this hex has been reused *after* first being capped.
+   * A capped tile starts at 0 and gains +1 for each additional successful word
+   * submission that includes it.
+   */
+  readonly reuseCount?: number;
 }

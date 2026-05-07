@@ -2,13 +2,23 @@
  * Renders the central flower field. Each `FlowerPatch` is one of three types
  * (vowel / common / rare) and shows up as a 6-petal arrangement around its
  * (unused) center hex. Petals fall off as they wither — by the time a petal's
- * `witherAt` is close to engine-time it visibly fades and shrinks. Players
- * tap any petal to queue its hex for their next worker.
+ * `witherAt` is close to engine-time it visibly fades and shrinks.
+ *
+ * To collect a letter the player presses-and-holds a petal. After
+ * {@link HOLD_DURATION_MS} a worker bee is dispatched directly — there is no
+ * letter queue. The held petal grows a yellow border that finishes drawing
+ * around the hex exactly as the timer completes; that border *persists* for
+ * the bee's whole flight to mark the petal as claimed (yellow for the player,
+ * pink for the rival on contested petals). Trying to hold a petal without
+ * enough honey, or with no empty storage to land a letter in, plays a brief
+ * red flash instead.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   axialToPixel,
+  BEE_STATS,
+  FIELD_RADIUS,
   hex,
   hexEquals,
   hexKey,
@@ -19,15 +29,17 @@ import {
   type Petal,
 } from '@hivemind/shared';
 import { useGameStore } from '../../state/gameStore.js';
-import { FIELD_RADIUS } from '../../game/engine/state.js';
 import {
   centeredViewBoxExtent,
   registerGrid,
   unregisterGrid,
 } from '../../game/layout.js';
+import { HOLD_DURATION_MS, useHoldToDispatch } from '../useHoldToDispatch.js';
 
 const HEX_SIZE = 26;
+const PETAL_HEX_SIZE = HEX_SIZE * 0.92;
 
+/** Hex path starting at the upper-right vertex (used for tile fills). */
 const hexPath = (size: number): string => {
   const points: string[] = [];
   for (let i = 0; i < 6; i++) {
@@ -37,8 +49,16 @@ const hexPath = (size: number): string => {
   return `M${points.join(' L')} Z`;
 };
 
-const queueIndex = (queue: readonly Hex[], h: Hex): number =>
-  queue.findIndex((q) => hexEquals(q, h));
+/** Hex path starting at the *top* vertex and going clockwise — used for the
+ *  hold border so the line draws downward from 12 o'clock. */
+const holdBorderPath = (size: number): string => {
+  const points: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    const angle = (Math.PI / 180) * (60 * i - 90);
+    points.push(`${(size * Math.cos(angle)).toFixed(2)},${(size * Math.sin(angle)).toFixed(2)}`);
+  }
+  return `M${points.join(' L')} Z`;
+};
 
 const TYPE_LABEL: Record<FlowerType, string> = {
   vowel: 'VOWEL',
@@ -58,9 +78,69 @@ const witherFactor = (petal: Petal, t: number): number => {
 export const FlowerField = () => {
   const patches = useGameStore((s) => s.world.patches);
   const engineT = useGameStore((s) => s.world.t);
-  const selfQueue = useGameStore((s) => s.world.self.letterQueue);
-  const oppQueue = useGameStore((s) => s.world.opponent.letterQueue);
-  const toggleQueue = useGameStore((s) => s.toggleLetterQueue);
+  const honey = useGameStore((s) => s.world.self.honey);
+  const tiles = useGameStore((s) => s.world.self.tiles);
+  const selfBees = useGameStore((s) => s.world.self.bees);
+  const oppBees = useGameStore((s) => s.world.opponent.bees);
+  const dispatchWorker = useGameStore((s) => s.dispatchWorker);
+  const pushToast = useGameStore((s) => s.pushToast);
+  const workerCost = BEE_STATS.worker.honeyCost;
+
+  // Pre-flight gating: refuse the hold (and flash red) when there's no
+  // chance the resulting dispatch could succeed — i.e. not enough honey,
+  // or every storage slot already holds a letter. On rejection we also push
+  // a contextual toast at the petal so the player sees *why* the gesture
+  // bounced.
+  const hasEmptyStorage = useMemo(
+    () => tiles.some((t) => t.state === 'storage' && !t.letter),
+    [tiles],
+  );
+  // Refs let canStart see the *latest* values at click time without making
+  // the predicate re-create on every honey/tile tick.
+  const honeyRef = useRef(honey);
+  honeyRef.current = honey;
+  const hasEmptyStorageRef = useRef(hasEmptyStorage);
+  hasEmptyStorageRef.current = hasEmptyStorage;
+  const canStart = useCallback(
+    (h: Hex) => {
+      if (honeyRef.current < workerCost) {
+        pushToast({ text: 'not enough honey', panel: 'flowers', hex: h, variant: 'error' });
+        return false;
+      }
+      if (!hasEmptyStorageRef.current) {
+        pushToast({ text: 'storage full', panel: 'flowers', hex: h, variant: 'error' });
+        return false;
+      }
+      return true;
+    },
+    [workerCost, pushToast],
+  );
+
+  const { hold, rejection, start, cancel } = useHoldToDispatch(dispatchWorker, {
+    canStart,
+  });
+
+  // Petals being targeted by an in-flight worker. While the bee is en route,
+  // we keep an outline on the petal so the player can see it's claimed; the
+  // rival's claims show up in pink so contested petals are obvious.
+  const selfClaims = useMemo(() => {
+    const set = new Set<string>();
+    for (const bee of selfBees) {
+      if (bee.state.kind === 'worker-flying-to-flower') {
+        set.add(hexKey(bee.state.target));
+      }
+    }
+    return set;
+  }, [selfBees]);
+  const oppClaims = useMemo(() => {
+    const set = new Set<string>();
+    for (const bee of oppBees) {
+      if (bee.state.kind === 'worker-flying-to-flower') {
+        set.add(hexKey(bee.state.target));
+      }
+    }
+    return set;
+  }, [oppBees]);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const allTiles = useMemo(() => range(hex(0, 0), FIELD_RADIUS), []);
@@ -93,10 +173,16 @@ export const FlowerField = () => {
     return () => unregisterGrid('flowers');
   }, [extent.halfWidth, extent.halfHeight]);
 
+  const holdSeconds = (HOLD_DURATION_MS / 1000).toFixed(0);
+  const petalBorderD = useMemo(() => holdBorderPath(PETAL_HEX_SIZE), []);
+  const petalFlashD = useMemo(() => hexPath(PETAL_HEX_SIZE), []);
+
   return (
     <div className="grid-frame">
       <h2 className="hud-title grid-heading">FLOWER FIELD</h2>
-      <p className="grid-subtitle">tap a petal to queue it · 3 patches · withering</p>
+      <p className="grid-subtitle">
+        hold a petal {holdSeconds}s to send a worker · {workerCost}🜨
+      </p>
       <svg
         ref={svgRef}
         className="hex-svg"
@@ -104,7 +190,8 @@ export const FlowerField = () => {
         preserveAspectRatio="xMidYMid meet"
         role="img"
         aria-label="flower field"
-        style={{ touchAction: 'manipulation' }}
+        style={{ touchAction: 'none', WebkitTouchCallout: 'none' }}
+        onContextMenu={(e) => e.preventDefault()}
       >
         {patches.map((patch: FlowerPatch) => {
           const cp = axialToPixel(patch.center, HEX_SIZE);
@@ -123,12 +210,15 @@ export const FlowerField = () => {
               {patch.petals.map((petal) => {
                 const pp = axialToPixel(petal.hex, HEX_SIZE);
                 const w = witherFactor(petal, engineT);
-                const selfIdx = queueIndex(selfQueue, petal.hex);
-                const oppIdx = queueIndex(oppQueue, petal.hex);
-                const queuedSelf = selfIdx >= 0;
-                const queuedOpp = oppIdx >= 0;
                 const scale = 1 - w * 0.35;
-                const k = `${patch.id}-${hexKey(petal.hex)}`;
+                const petalKey = hexKey(petal.hex);
+                const k = `${patch.id}-${petalKey}`;
+                const isHeld = hold.hex !== null && hexEquals(hold.hex, petal.hex);
+                const isRejected =
+                  rejection !== null && hexEquals(rejection.hex, petal.hex);
+                const claimedBySelf = selfClaims.has(petalKey);
+                const claimedByOpp = oppClaims.has(petalKey);
+                const progress = isHeld ? hold.progress : 0;
                 return (
                   <g
                     key={k}
@@ -136,30 +226,59 @@ export const FlowerField = () => {
                     className="flower-petal"
                     data-type={patch.type}
                     data-withering={w > 0.001}
+                    data-holding={isHeld}
                     style={{ opacity: 1 - w * 0.55, cursor: 'pointer' }}
-                    onClick={() => toggleQueue(petal.hex)}
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      // Release implicit capture so the hold cancels cleanly
+                      // when the finger drifts off the petal on touch devices.
+                      try {
+                        e.currentTarget.releasePointerCapture(e.pointerId);
+                      } catch {
+                        // No active capture — ignore.
+                      }
+                      start(petal.hex);
+                    }}
+                    onPointerUp={() => cancel(petal.hex)}
+                    onPointerLeave={() => cancel(petal.hex)}
+                    onPointerCancel={() => cancel(petal.hex)}
                   >
                     <path
-                      d={hexPath(HEX_SIZE * 0.92)}
+                      d={hexPath(PETAL_HEX_SIZE)}
                       className="petal-tile"
                       data-type={patch.type}
-                      data-queued-self={queuedSelf}
-                      data-queued-opp={queuedOpp}
                     />
                     <text className="hex-letter petal-letter" x={0} y={0}>
                       {petal.letter}
                     </text>
-                    {queuedSelf && (
-                      <g className="flower-badge flower-badge-self">
-                        <circle r={8} cx={HEX_SIZE * 0.55} cy={-HEX_SIZE * 0.55} />
-                        <text x={HEX_SIZE * 0.55} y={-HEX_SIZE * 0.55}>{selfIdx + 1}</text>
-                      </g>
+                    {claimedBySelf && !isHeld && (
+                      <path
+                        d={petalFlashD}
+                        className="claim-border"
+                        data-owner="self"
+                      />
                     )}
-                    {queuedOpp && (
-                      <g className="flower-badge flower-badge-opp">
-                        <circle r={8} cx={-HEX_SIZE * 0.55} cy={-HEX_SIZE * 0.55} />
-                        <text x={-HEX_SIZE * 0.55} y={-HEX_SIZE * 0.55}>{oppIdx + 1}</text>
-                      </g>
+                    {claimedByOpp && (
+                      <path
+                        d={petalFlashD}
+                        className="claim-border"
+                        data-owner="opp"
+                      />
+                    )}
+                    {isHeld && (
+                      <path
+                        d={petalBorderD}
+                        className="hold-border"
+                        pathLength={100}
+                        strokeDasharray={`${(progress * 100).toFixed(2)} 100`}
+                      />
+                    )}
+                    {isRejected && (
+                      <path
+                        key={rejection.token}
+                        d={petalFlashD}
+                        className="hex-reject-flash"
+                      />
                     )}
                   </g>
                 );

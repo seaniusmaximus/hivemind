@@ -3,3 +3,5 @@ export * from './letters.js';
 export * from './bees.js';
 export * from './messages.js';
 export * from './scoring.js';
+export * from './tileHp.js';
+export * from './engine/state.js';

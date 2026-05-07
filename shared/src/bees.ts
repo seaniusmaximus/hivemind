@@ -1,7 +1,7 @@
 import type { Hex } from './hex.js';
 import type { Letter } from './letters.js';
 
-export type BeeKind = 'worker' | 'carpenter' | 'drone';
+export type BeeKind = 'worker' | 'carpenter' | 'drone' | 'queen';
 
 export interface BeeStats {
   readonly capacity: number;
@@ -12,9 +12,12 @@ export interface BeeStats {
 }
 
 export const BEE_STATS: Readonly<Record<BeeKind, BeeStats>> = {
-  worker: { capacity: 5, honeyCost: 3, flightSeconds: 1.5 },
-  carpenter: { capacity: 2, honeyCost: 5, flightSeconds: 1.2 },
+  // Workers and carpenters are now single-trip dispatches: each hold-to-send
+  // gesture spawns one bee that visits exactly one target and returns.
+  worker: { capacity: 1, honeyCost: 3, flightSeconds: 1.5 },
+  carpenter: { capacity: 1, honeyCost: 5, flightSeconds: 1.2 },
   drone: { capacity: 2, honeyCost: 7, flightSeconds: 1.6 },
+  queen: { capacity: 1, honeyCost: 20, flightSeconds: 10 },
 };
 
 /**
@@ -22,24 +25,25 @@ export const BEE_STATS: Readonly<Record<BeeKind, BeeStats>> = {
  *
  * Honey is the only resource. It is generated passively at a rate
  * proportional to your hive size, and stored up to a cap that scales with
- * how many *empty* active tiles you have (room in the comb). Word caps and
- * chains pay out additional honey on top.
+ * how many honeycomb hexes you own. Word caps and chains pay out additional
+ * honey on top.
  *
  * - `regenPerHex` is multiplied by the total number of owned hex tiles
  *   (hive + storage + active + letter + capped) to get your per-second rate.
- * - `capBase + capPerEmptyTile * emptyActiveCount` gives your honey ceiling.
- *   Filling tiles with letters reduces your headroom; growing the hive with
- *   carpenters raises both your rate and (when the new tile is empty) your
- *   cap.
+ * - The honey cap is the sum of:
+ *   - {@link HIVE.hiveStorage} for the central hive tile, and
+ *   - 1 for every owned tile that is *not* the central hive and *not* a
+ *     letter-storage slot (i.e. active / letter / capped tiles).
+ *   So a fresh hive (1 hive + 6 storage + 12 active) starts at
+ *   `5 + 12 = 17`. Carpenters grow the cap by adding active tiles; queen
+ *   damage shrinks it by destroying them.
  */
 export const HIVE = {
   startingHoney: 5,
   /** Honey regenerated per second, per owned hex tile. */
   regenPerHex: 0.04,
-  /** Baseline honey storage cap (independent of hive size). */
-  capBase: 10,
-  /** Additional cap room contributed by each empty active tile. */
-  capPerEmptyTile: 2,
+  /** Capacity contributed by the central hive tile itself. */
+  hiveStorage: 5,
 } as const;
 
 /** Per-segment flight times (seconds). */
@@ -53,6 +57,7 @@ export const FLIGHT_TIMES = {
   tileToHive: 0.7,
   /** Drone time to walk a single word path. Total cap time scales with path count. */
   cappingPerPath: 1.4,
+  queenToHive: 1.2,
 } as const;
 
 /** Identifies which on-screen panel a bee waypoint lives in. */
@@ -96,6 +101,11 @@ export type BeeState =
       readonly flight: BeeFlight;
     }
   | {
+      readonly kind: 'worker-flying-to-freed';
+      readonly target: Hex;
+      readonly flight: BeeFlight;
+    }
+  | {
       readonly kind: 'worker-returning';
       readonly flight: BeeFlight;
     }
@@ -116,6 +126,23 @@ export type BeeState =
       readonly paths: readonly (readonly Hex[])[];
       readonly startedAt: number;
       readonly arrivesAt: number;
+    }
+  | {
+      readonly kind: 'queen-flying';
+      /** Final attack panel (defender side), used after the flight lands. */
+      readonly assaultPanel: 'self-hive' | 'opponent-hive';
+      /** Hex on the defender's grid where the queen lands. */
+      readonly landingHex: Hex;
+      /** Engine-time at which the assault phase ends. */
+      readonly expiresAt: number;
+      readonly flight: BeeFlight;
+    }
+  | {
+      readonly kind: 'queen-assault';
+      readonly panel: 'self-hive' | 'opponent-hive';
+      readonly currentHex: Hex;
+      readonly expiresAt: number;
+      readonly nextActionAt: number;
     };
 
 /** Convenience accessor — returns the bee's current `BeeFlight`, if any. */
@@ -123,9 +150,11 @@ export const beeFlight = (state: BeeState): BeeFlight | null => {
   switch (state.kind) {
     case 'worker-flying-to-flower':
     case 'worker-flying-to-drop':
+    case 'worker-flying-to-freed':
     case 'worker-returning':
     case 'carpenter-flying':
     case 'carpenter-returning':
+    case 'queen-flying':
       return state.flight;
     default:
       return null;

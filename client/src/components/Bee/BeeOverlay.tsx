@@ -20,6 +20,8 @@ const colorFor = (kind: string): string =>
     ? 'var(--honey)'
     : kind === 'drone'
       ? 'var(--neon-pink)'
+      : kind === 'queen'
+        ? '#fff2c4'
       : 'var(--neon-cyan)';
 
 const beeViewportPos = (
@@ -62,6 +64,9 @@ const beeViewportPos = (
     const b = waypointViewport(bee.state.panel, path[i + 1]!);
     if (!a || !b) return null;
     return { x: lerp(a.x, b.x, segT), y: lerp(a.y, b.y, segT) };
+  }
+  if (bee.state.kind === 'queen-assault') {
+    return waypointViewport(bee.state.panel, bee.state.currentHex);
   }
   return null;
 };
@@ -115,6 +120,11 @@ export const BeeOverlay = () => {
           >
             <circle r={6} fill="currentColor" />
             <circle r={11} fill="none" stroke="currentColor" opacity={0.4} />
+            {bee.kind === 'queen' && (
+              <text className="bee-letter" x={0} y={-14}>
+                👑
+              </text>
+            )}
             {letter && (
               <text className="bee-letter" x={0} y={-14}>
                 {letter}
