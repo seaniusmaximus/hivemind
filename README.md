@@ -8,10 +8,11 @@ See [`plans.md`](./plans.md) for the full design doc.
 
 ```
 hivemind/
-├── shared/   shared types, hex math, scoring, message protocol
-├── client/   React 19 + Vite + Zustand + GSAP front-end
-├── server/   Node + ws lobby/room server
-└── jest.config.cjs   multi-project test runner
+├── shared/         shared types, hex math, scoring, message protocol
+├── client/         React 19 + Vite + Zustand + GSAP front-end
+├── server/         Cloudflare Worker + Durable Objects (LobbyDO + RoomDO)
+├── wrangler.jsonc  Cloudflare deployment config (Worker, DOs, [assets])
+└── jest.config.cjs multi-project test runner
 ```
 
 Managed with npm workspaces.
@@ -32,14 +33,54 @@ Open http://localhost:5173 — the client will boot into a local solo state with
 
 ## Useful scripts
 
-| Command            | Description                                                  |
-| ------------------ | ------------------------------------------------------------ |
-| `npm run dev`      | Start client + server in parallel                            |
-| `npm run dev:client` | Start only the Vite dev server                              |
-| `npm run dev:server` | Start only the websocket server                             |
-| `npm run build`    | Build shared, client, and server                             |
-| `npm test`         | Run all jest projects (shared, client, server)               |
-| `npm run lint`     | Type-check the whole monorepo (`tsc -b`)                     |
+| Command              | Description                                                |
+| -------------------- | ---------------------------------------------------------- |
+| `npm run dev`        | Start client + worker dev server in parallel               |
+| `npm run dev:client` | Start only the Vite dev server (proxies `/ws` and `/api` to `:8787`) |
+| `npm run dev:server` | Start only `wrangler dev` (Worker + DOs on `:8787`)         |
+| `npm run build`      | Build shared, client, and server                           |
+| `npm run deploy`     | Build the SPA and `wrangler deploy` the Worker             |
+| `npm test`           | Run all jest projects (shared, client, server)             |
+| `npm run lint`       | Type-check the whole monorepo (`tsc -b`)                   |
+
+## Deploying to Cloudflare
+
+The whole stack runs on a single Cloudflare Worker:
+
+- The built Vite SPA in `client/dist` is served via the Worker's `[assets]`
+  binding (with SPA fallback to `index.html`).
+- `POST /api/rooms` mints a fresh room code via the singleton `LobbyDO`.
+- `GET /ws/<code>` upgrades to a WebSocket and forwards to `RoomDO(code)`,
+  which owns the authoritative `GameLoop` + 1–2 player sockets.
+
+### One-time setup
+
+1. Install the Wrangler CLI (already a workspace devDependency) and log in:
+   ```bash
+   npx wrangler login
+   ```
+2. Push this repo to GitHub.
+3. In the Cloudflare dashboard, go to **Workers & Pages → Create → Connect to Git**,
+   pick the repo, and configure:
+   - Build command: `npm install && npm run build:shared && npm run build:client`
+   - Deploy command: `npx wrangler deploy`
+   - Production branch: `main`
+
+   (The `build:server` step only runs `tsc -b` for type-checking — Wrangler
+   bundles `server/src/worker.ts` itself, so it's not strictly needed for
+   deploy. Including it catches type errors before the deploy command runs.)
+
+That's it. Pushes to `main` deploy automatically; PRs get preview URLs.
+
+### Manual deploy
+
+```bash
+npm run deploy
+```
+
+This runs the SPA build then `wrangler deploy`. The Durable Object migrations
+in `wrangler.jsonc` create the SQLite-backed `LobbyDO` / `RoomDO` namespaces on
+first deploy.
 
 ## Status
 

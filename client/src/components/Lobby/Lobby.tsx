@@ -27,7 +27,13 @@ const ChooseRoom = () => {
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
 
-  const ready = status === 'open' && name.trim().length > 0;
+  // Under the Cloudflare backend the WS only opens after the user picks
+  // create-or-join, so the buttons are gated on having a name (and a valid
+  // code for join), not on a pre-existing socket. While a request is in
+  // flight `status === 'connecting'`, so we lock the buttons to prevent
+  // double-fires.
+  const busy = status === 'connecting';
+  const ready = !busy && name.trim().length > 0;
 
   return (
     <div className="lobby-card">

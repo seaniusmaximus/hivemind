@@ -381,17 +381,16 @@ describe('gameStore — net slice', () => {
     expect(useGameStore.getState().net.lastError).toMatch(/room not found/);
   });
 
-  test('createRoom / joinRoom / sendReady forward typed messages', () => {
+  test('sendReady forwards a typed READY message on the current connection', () => {
+    // createRoom / joinRoom now own the WebSocket lifecycle themselves (they
+    // call `openRoomConnection`), so they can't be exercised through the
+    // pre-injected `conn` test seam. The HELLO they send on socket-open is
+    // covered by the server-side roomDO behavior. We only verify here that
+    // sendReady talks over an existing connection.
     const { conn, sent } = makeFakeConn();
     useGameStore.getState()._setConnection(conn);
-    useGameStore.getState().createRoom('alice');
-    useGameStore.getState().joinRoom('ABC123', 'bob');
     useGameStore.getState().sendReady();
-    expect(sent).toEqual([
-      { type: 'CREATE_ROOM', playerName: 'alice' },
-      { type: 'JOIN_ROOM', roomCode: 'ABC123', playerName: 'bob' },
-      { type: 'READY' },
-    ]);
+    expect(sent).toEqual([{ type: 'READY' }]);
   });
 
   test('leaveLobby tears down state and re-inits a fresh solo world', () => {

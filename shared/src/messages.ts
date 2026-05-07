@@ -43,8 +43,11 @@ export type GameCommand =
 export type GameCommandKind = GameCommand['kind'];
 
 export type ClientMessage =
-  | { type: 'CREATE_ROOM'; playerName: string }
-  | { type: 'JOIN_ROOM'; roomCode: string; playerName: string }
+  /** First message after the WebSocket opens; identifies the player.
+   *  Room creation/lookup happens out-of-band (HTTP `POST /api/rooms` to mint
+   *  a code, then the client connects to `/ws/<code>`). The DO that owns the
+   *  code keys players in by HELLO; first-in becomes host, second is joiner. */
+  | { type: 'HELLO'; playerName: string }
   | { type: 'READY' }
   | { type: 'LEAVE' }
   | {

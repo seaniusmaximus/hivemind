@@ -16,6 +16,7 @@
     "build:shared": "npm run build -w shared",
     "build:client": "npm run build -w client",
     "build:server": "npm run build -w server",
+    "deploy": "npm run build:shared && npm run build:client && npm run deploy -w server",
     "test": "jest",
     "test:watch": "jest --watch",
     "lint": "tsc -b --pretty"

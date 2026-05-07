@@ -1,0 +1,32 @@
+{
+  // Single Cloudflare Worker that serves the built Vite SPA from `client/dist`
+  // via the [assets] binding, and routes WebSocket upgrades + the room-create
+  // HTTP endpoint to two Durable Object classes:
+  //
+  //   POST /api/rooms       → LobbyDO mints a fresh room code
+  //   GET  /ws/<code>       → upgrades the WS, forwards to RoomDO(<code>)
+  //   *                     → SPA assets (with SPA fallback to index.html)
+  //
+  // LobbyDO is a singleton (idFromName "singleton") that owns the active-code
+  // registry. RoomDO is one instance per room — its DO id is `idFromName(code)`
+  // so any client connecting to `/ws/<code>` lands on the right room.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hivemind",
+  "main": "server/src/worker.ts",
+  "compatibility_date": "2025-04-01",
+  "assets": {
+    "directory": "./client/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "LOBBY", "class_name": "LobbyDO" },
+      { "name": "ROOM",  "class_name": "RoomDO"  }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["LobbyDO", "RoomDO"] }
+  ],
+  "observability": { "enabled": true }
+}

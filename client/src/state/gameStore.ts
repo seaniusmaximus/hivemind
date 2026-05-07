@@ -23,8 +23,8 @@ import {
 } from '@hivemind/shared';
 import { validateWord, wordStatus } from '../game/dictionary.js';
 import {
-  DEFAULT_WS_URL,
-  openConnection,
+  createRoomCode,
+  openRoomConnection,
   type ConnectionStatus,
   type NetConnection,
 } from '../game/net/connection.js';
@@ -155,13 +155,18 @@ interface GameStore {
   submitDraft: () => Promise<void>;
 
   // ---- multiplayer actions ----
-  /** Enter lobby mode and open a websocket. Idempotent. */
-  enterLobby: (url?: string) => void;
+  /** Switch into lobby mode. No socket is opened until the player chooses to
+   *  create or join a room — under the Cloudflare backend, the WS lifecycle is
+   *  bound 1:1 to a specific room code, so there's no point opening one
+   *  speculatively. Idempotent. */
+  enterLobby: () => void;
   /** Leave lobby/online: close the socket, return to solo with a fresh world. */
   leaveLobby: () => void;
-  /** Send `CREATE_ROOM`. Buffers if the socket isn't open yet. */
-  createRoom: (playerName: string) => void;
-  /** Send `JOIN_ROOM`. */
+  /** Mint a new room code (HTTP `POST /api/rooms`), open a WS to that room,
+   *  and send `HELLO` once the socket is up. */
+  createRoom: (playerName: string) => Promise<void>;
+  /** Open a WS to the given room code and send `HELLO`. The server will
+   *  reject the upgrade with 404 if the code is unknown. */
   joinRoom: (roomCode: string, playerName: string) => void;
   /** Mark this player ready. */
   sendReady: () => void;
@@ -481,18 +486,16 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   // ---- multiplayer actions ----
 
-  enterLobby: (url = DEFAULT_WS_URL) => {
-    if (conn) return;
-    set({
-      mode: 'lobby',
-      net: { status: 'connecting', lastError: null },
-      room: null,
-    });
-    conn = openConnection(url, {
-      onMessage: (msg) => get()._handleServerMessage(msg),
-      onStatus: (status) => {
-        set((s) => ({ net: { ...s.net, status } }));
-      },
+  enterLobby: () => {
+    set((s) => {
+      // Don't clobber an active connection. If we're already in lobby/online,
+      // re-entering is a no-op.
+      if (s.mode !== 'solo') return s;
+      return {
+        mode: 'lobby',
+        net: { status: 'idle', lastError: null },
+        room: null,
+      };
     });
   },
 
@@ -512,14 +515,48 @@ export const useGameStore = create<GameStore>((set, get) => ({
     get().initSolo();
   },
 
-  createRoom: (playerName) => {
-    if (!conn) return;
-    conn.send({ type: 'CREATE_ROOM', playerName });
+  createRoom: async (playerName) => {
+    if (conn) return;
+    set((s) => ({ net: { ...s.net, status: 'connecting', lastError: null } }));
+    let code: string;
+    try {
+      code = await createRoomCode();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'create failed';
+      set({ net: { status: 'error', lastError: msg } });
+      return;
+    }
+    // Stash the code now so the lobby UI can render it before ROOM_STATE
+    // arrives. The server's ROOM_STATE will overwrite this with the same value.
+    set((s) => ({
+      room: {
+        code,
+        phase: 'lobby',
+        players: [],
+        selfId: s.room?.selfId ?? null,
+        opponentId: s.room?.opponentId ?? null,
+        result: null,
+      },
+    }));
+    conn = openRoomConnection(code, {
+      onMessage: (msg) => get()._handleServerMessage(msg),
+      onStatus: (status) => {
+        set((s) => ({ net: { ...s.net, status } }));
+      },
+      onOpen: () => conn?.send({ type: 'HELLO', playerName }),
+    });
   },
 
   joinRoom: (roomCode, playerName) => {
-    if (!conn) return;
-    conn.send({ type: 'JOIN_ROOM', roomCode, playerName });
+    if (conn) return;
+    set((s) => ({ net: { ...s.net, status: 'connecting', lastError: null } }));
+    conn = openRoomConnection(roomCode, {
+      onMessage: (msg) => get()._handleServerMessage(msg),
+      onStatus: (status) => {
+        set((s) => ({ net: { ...s.net, status } }));
+      },
+      onOpen: () => conn?.send({ type: 'HELLO', playerName }),
+    });
   },
 
   sendReady: () => {
