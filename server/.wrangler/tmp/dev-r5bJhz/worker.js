@@ -393,7 +393,7 @@ var pickEmptyStorage = /* @__PURE__ */ __name((player) => {
   }
   return null;
 }, "pickEmptyStorage");
-var tickWorld = /* @__PURE__ */ __name((world, dt, rng) => {
+var tickWorld = /* @__PURE__ */ __name((world, dt, rng, opts = {}) => {
   if (world.phase === "over")
     return world;
   let next = {
@@ -405,7 +405,9 @@ var tickWorld = /* @__PURE__ */ __name((world, dt, rng) => {
   next = resolveArrivedBees(next);
   next = tickQueens(next);
   next = tickFreedLetters(next);
-  next = tickPatches(next, dt, rng);
+  if (!opts.clientPrediction) {
+    next = tickPatches(next, dt, rng);
+  }
   return next;
 }, "tickWorld");
 var tickFreedLetters = /* @__PURE__ */ __name((world) => {

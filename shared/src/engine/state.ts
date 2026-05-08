@@ -373,11 +373,32 @@ const pickEmptyStorage = (player: PlayerState): TileSnapshot | null => {
 
 // ---- Top-level tick --------------------------------------------------------
 
+export interface TickOptions {
+  /**
+   * Skip RNG-driven simulation steps that the server owns authoritatively.
+   * Set this when running {@link tickWorld} as client-side prediction in
+   * online mode: the next `SNAPSHOT` will replace `patches` and freed letters
+   * wholesale, so simulating them locally with a desynchronized RNG only
+   * produces visible flicker (e.g. flowers spawning at a different position
+   * than the server picked, then snapping back when the snapshot arrives).
+   *
+   * Deterministic work — engine clock, honey trickle, bee arrivals, queen
+   * damage timing — still runs so animations stay smooth between snapshots.
+   */
+  readonly clientPrediction?: boolean;
+}
+
 /**
  * Advance the world by `dt` seconds with no AI. The server calls this for
- * authoritative simulation; solo clients compose with {@link tickSoloAi}.
+ * authoritative simulation; solo clients compose with {@link tickSoloAi};
+ * online clients pass `{ clientPrediction: true }` between snapshots.
  */
-export const tickWorld = (world: World, dt: number, rng: () => number): World => {
+export const tickWorld = (
+  world: World,
+  dt: number,
+  rng: () => number,
+  opts: TickOptions = {},
+): World => {
   if (world.phase === 'over') return world;
   let next: World = {
     ...world,
@@ -388,7 +409,12 @@ export const tickWorld = (world: World, dt: number, rng: () => number): World =>
   next = resolveArrivedBees(next);
   next = tickQueens(next);
   next = tickFreedLetters(next);
-  next = tickPatches(next, dt, rng);
+  // Patch wither/spawn lives server-side in online mode — the snapshot will
+  // overwrite `patches`, and locally-simulated spawns desync from the
+  // server's RNG, causing flickering flower positions.
+  if (!opts.clientPrediction) {
+    next = tickPatches(next, dt, rng);
+  }
   return next;
 };
 

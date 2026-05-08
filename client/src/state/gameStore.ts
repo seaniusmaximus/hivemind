@@ -254,9 +254,12 @@ export const useGameStore = create<GameStore>((set, get) => ({
         // Run the pure engine simulation locally for smooth bee animations
         // and honey trickle between snapshots — every SNAPSHOT replaces
         // `world` with the authoritative state, so any local drift is
-        // continuously corrected. We must skip the solo AI here: the
+        // continuously corrected. `clientPrediction: true` skips the RNG-
+        // driven flower-patch step (the server owns spawn positions; running
+        // it locally with a desynced seed makes flowers visibly jitter as
+        // the snapshot snaps them back). The solo AI is also skipped: the
         // server is the only thing allowed to dispatch the opponent.
-        return { world: tickWorld(s.world, dt, rng) };
+        return { world: tickWorld(s.world, dt, rng, { clientPrediction: true }) };
       }
       return { world: tickSolo(s.world, dt, rng) };
     });
