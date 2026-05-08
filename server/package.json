@@ -9,7 +9,8 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@hivemind/shared": "0.0.1"
+    "@hivemind/shared": "0.0.1",
+    "wordlist-english": "^1.2.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250404.0",

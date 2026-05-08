@@ -97,7 +97,7 @@ Tracking against `plans.md` milestones:
 
 - [x] **M1** — Workspace + tooling, hex math + Scrabble bag + scoring, three-panel UI, WS server stub
 - [x] **M2** — Solo loop: fixed-timestep tick, honey regen, flower respawn, worker bees deliver letters, drag-to-form-word drone caps, dummy AI
-- [x] **M3** — Carpenter bees + build queue, branches through capped tiles, multi-word drone caps with chain ×1.5 bonus, async dictionary validation against dictionaryapi.dev with cached ✓/✗/`…` feedback
+- [x] **M3** — Carpenter bees + build queue, branches through capped tiles, multi-word drone caps with chain ×1.5 bonus, instant local dictionary validation via the bundled `wordlist-english` list with ✓/✗ feedback
 - [x] **M3.5** — Honey-only economy: HP and score variables retired, regen scales with hive size, cap scales with empty active tiles, word caps pay honey bonuses, victory by highest honey at timer end
 - [ ] **M4** — GSAP feel pass, special bonus tiles, sound, animation polish
 - [ ] **M5** — Real CPU AI (easy/medium/hard)
@@ -124,7 +124,7 @@ Tracking against `plans.md` milestones:
 - **Hold a petal** for 1 second to dispatch a worker (3 honey). A yellow border draws around the hex as the timer fills, then stays on as a "claimed" marker for the rest of the bee's flight. Rival claims show up as a dashed pink outline so contested petals are obvious at a glance. The bee flies hive → petal → hive, drops the letter into the next empty storage slot, and despawns. Holds can be aborted by lifting your finger or dragging it off the petal. **If the petal is gone when your bee arrives — the rival took it, or it withered — your bee just heads home.** Trying to hold without enough honey, or with no empty storage to land a letter in, plays a brief red flash and a contextual popup (e.g. "not enough honey") that drifts up out of the hex you just touched.
 - On your hive, **drag a letter out of a storage slot onto an empty active tile** to place it. Empty active tiles glow cyan as drop targets while you drag, and a ghost letter follows your pointer. Once placed, the letter is locked.
 - **Grow your hive**: hold a frontier hex (any dim hex touching your active hive) for 1 second to dispatch a carpenter (5 honey). One hold = one new tile, expanding your regen, your cap (while empty), and the frontier outward. The yellow outline persists on the hex until the carpenter arrives.
-- To score, **drag across adjacent placed letters** (and any already-capped tiles, which act as branch points) to draft a word. **Drag a second time** to draft a second word — drone capacity is 2. Drafted words appear in the right panel with a `✓`/`✗`/`…` validation badge as the dictionary lookup resolves.
+- To score, **drag across adjacent placed letters** (and any already-capped tiles, which act as branch points) to draft a word. **Drag a second time** to draft a second word — drone capacity is 2. Drafted words appear in the right panel with a `✓`/`✗` validation badge — lookups hit a bundled local word list, so they're instant.
 - Press `SUBMIT` to spend 7 honey on a drone that caps every valid word. Each capped word pays its score back to you as honey; chains pay 1.5×.
 - A dummy AI on the rival side periodically dispatches workers and carpenters, places letters, and scores phantom words for honey. It exists only as a moving target; the real AI lands in M5.
 

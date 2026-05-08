@@ -69,6 +69,9 @@ export const HiveGrid = ({ side }: Props) => {
   const dispatchCarpenter = useGameStore((s) => s.dispatchCarpenter);
   const dispatchWorker = useGameStore((s) => s.dispatchWorker);
   const dispatchQueen = useGameStore((s) => s.dispatchQueen);
+  const confirmQueenTarget = useGameStore((s) => s.confirmQueenTarget);
+  const cancelQueenTargeting = useGameStore((s) => s.cancelQueenTargeting);
+  const queenTargeting = useGameStore((s) => s.queenTargeting);
   const pushToast = useGameStore((s) => s.pushToast);
   const honey = useGameStore((s) => s.world.self.honey);
 
@@ -243,6 +246,20 @@ export const HiveGrid = ({ side }: Props) => {
     h: Hex,
     tile: TileSnapshot,
   ) => {
+    // Queen targeting overrides everything — and is the one path that's also
+    // active on the opponent grid. Tapping the opponent's owned non-hive tile
+    // commits the queen's landing pick; tapping a non-targetable spot cancels.
+    if (queenTargeting && side === 'opponent') {
+      // Owned non-hive tiles are valid landing pads. Frontier hexes are
+      // synthesized client-side with `state === 'inactive'`, which the engine
+      // also rejects, so the same check handles both.
+      if (tile.state !== 'hive' && tile.state !== 'inactive') {
+        confirmQueenTarget(h);
+      } else {
+        cancelQueenTargeting();
+      }
+      return;
+    }
     if (!interactive) return;
     // Touch devices implicitly capture the pointer to the originating element
     // on `pointerdown`, which retargets every subsequent pointer event back to
@@ -260,7 +277,13 @@ export const HiveGrid = ({ side }: Props) => {
       pendingLetterAnchorRef.current = null;
     }
     if (tile.state === 'hive') {
-      // Click-the-crown: spawn an attacking queen at the cost of 20 honey.
+      // Already in targeting mode? Treat clicking your own hive as a cancel
+      // so the player has an obvious back-out gesture.
+      if (queenTargeting) {
+        cancelQueenTargeting();
+        return;
+      }
+      // Click-the-crown: enter queen targeting at the cost of 20 honey.
       if (honeyRef.current < queenCost) {
         pushToast({ text: 'not enough honey', panel: 'self-hive', hex: h, variant: 'error' });
         return;
@@ -377,6 +400,7 @@ export const HiveGrid = ({ side }: Props) => {
         preserveAspectRatio="xMidYMid meet"
         role="img"
         aria-label={`${side} hive grid`}
+        data-queen-targeting={queenTargeting && side === 'opponent' ? true : undefined}
         style={{ touchAction: 'none', WebkitTouchCallout: 'none' }}
         onContextMenu={(e) => e.preventDefault()}
       >
@@ -408,15 +432,23 @@ export const HiveGrid = ({ side }: Props) => {
           // tile we peel rings off so the visible borders mirror the tile's
           // remaining HP tier (every 2 damage = one ring lost).
           const reuseLevel = Math.max(0, reuseCount - Math.floor((t.damage ?? 0) / 2));
+          // Owned non-hive opponent tiles light up as queen landing options
+          // while the player is in the targeting window.
+          const isQueenTarget =
+            !!queenTargeting &&
+            side === 'opponent' &&
+            t.state !== 'hive' &&
+            t.state !== 'inactive';
           const interactiveTile =
-            interactive &&
-            ((t.state === 'storage' && !!t.letter) ||
-              (t.state === 'active' && !!t.letter) ||
-              t.state === 'letter' ||
-              t.state === 'capped' ||
-              isDropTarget ||
-              isCarpenterEligible ||
-              (t.state === 'hive' && canSpawnQueen));
+            isQueenTarget ||
+            (interactive &&
+              ((t.state === 'storage' && !!t.letter) ||
+                (t.state === 'active' && !!t.letter) ||
+                t.state === 'letter' ||
+                t.state === 'capped' ||
+                isDropTarget ||
+                isCarpenterEligible ||
+                (t.state === 'hive' && canSpawnQueen)));
           const tileSize =
             t.state === 'hive'
               ? HEX_SIZE * 1.05
@@ -443,6 +475,7 @@ export const HiveGrid = ({ side }: Props) => {
                 data-drop-target={isDropTarget}
                 data-drop-hover={isDropHover}
                 data-interactive={interactiveTile}
+                data-queen-target={isQueenTarget || undefined}
                 data-reuse-level={reuseLevel}
                 data-hp={hp}
                 onPointerDown={(e) => handlePointerDown(e, t.hex, t)}
@@ -463,8 +496,8 @@ export const HiveGrid = ({ side }: Props) => {
                   );
                 })}
               {t.state === 'hive' && (
-                <text className="hive-glyph" x={0} y={0}>
-                  ⬢
+                <text className="hive-honey" x={0} y={0}>
+                  {Math.floor(player.honey)}
                 </text>
               )}
               {t.state === 'hive' && canSpawnQueen && (

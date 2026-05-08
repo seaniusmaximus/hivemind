@@ -138,6 +138,12 @@ const pickQueenLandingHex = (defender: PlayerState): Hex | null =>
       return hexKey(a.hex).localeCompare(hexKey(b.hex));
     })[0]?.hex ?? null;
 
+/** Defender hex the queen may land on — must match {@link dispatchQueen} validation. */
+const isQueenLandingHex = (defender: PlayerState, h: Hex): boolean =>
+  defender.tiles.some(
+    (t) => hexEquals(t.hex, h) && t.state !== 'hive' && t.state !== 'inactive',
+  );
+
 const buildPlayer = (id: string): PlayerState => {
   const tiles: TileSnapshot[] = [];
   for (const h of range(hex(0, 0), HIVE_RADIUS)) {
@@ -560,14 +566,22 @@ const resolveSideBees = (world: World, side: Side): World => {
       }
       if (bee.state.kind === 'queen-flying') {
         const defender = world[otherSide(side)];
-        const desired = pickQueenLandingHex(defender);
-        if (!desired) {
-          beesChanged = true;
-          continue;
-        }
         const f = bee.state.flight;
+        const landing = bee.state.landingHex;
+        // Only snap to `pickQueenLandingHex` when the current landing tile is
+        // gone (destroyed). Otherwise we keep the player-picked or auto-picked
+        // hex for the whole flight — the old logic retargeted every tick to the
+        // outermost ring, which overwrote manual targets immediately.
+        let desired: Hex | null = landing;
+        if (!isQueenLandingHex(defender, landing)) {
+          desired = pickQueenLandingHex(defender);
+          if (!desired) {
+            beesChanged = true;
+            continue;
+          }
+        }
         const needRetarget =
-          !hexEquals(desired, bee.state.landingHex) || !hexEquals(desired, f.to.hex);
+          !hexEquals(desired, landing) || !hexEquals(desired, f.to.hex);
         const nextState = needRetarget
           ? {
               ...bee.state,
@@ -1328,8 +1342,17 @@ export const dispatchWorker = (world: World, side: Side, target: Hex): CommandRe
  * tile. Costs {@link BEE_STATS.queen.honeyCost}; the number of queens a side
  * may have airborne at once is given by {@link queenAllowanceFor} (one plus
  * one for every {@link HEXES_PER_QUEEN_SLOT} owned hexes).
+ *
+ * `target` is the player-selected landing hex on the enemy hive. If omitted
+ * (or null), the engine auto-picks the outermost owned non-hive tile via
+ * {@link pickQueenLandingHex} — used by the 5-second targeting fallback and
+ * by the older test fixtures.
  */
-export const dispatchQueen = (world: World, side: Side): CommandResult => {
+export const dispatchQueen = (
+  world: World,
+  side: Side,
+  target?: Hex,
+): CommandResult => {
   const player = world[side];
   const cost = BEE_STATS.queen.honeyCost;
   if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
@@ -1337,7 +1360,15 @@ export const dispatchQueen = (world: World, side: Side): CommandResult => {
     return { ok: false, world, reason: 'queen allowance reached' };
   }
   const enemy = world[otherSide(side)];
-  const landing = pickQueenLandingHex(enemy);
+  let landing: Hex | null;
+  if (target !== undefined) {
+    if (!isQueenLandingHex(enemy, target)) {
+      return { ok: false, world, reason: 'invalid queen target' };
+    }
+    landing = target;
+  } else {
+    landing = pickQueenLandingHex(enemy);
+  }
   if (!landing) return { ok: false, world, reason: 'enemy hive unavailable' };
   const ownerPanel = sideHivePanel(side);
   const enemyPanel = sideHivePanel(otherSide(side));
@@ -1564,7 +1595,7 @@ export const applyCommand = (
     case 'dispatchCarpenter':
       return dispatchCarpenter(world, side, cmd.target);
     case 'dispatchQueen':
-      return dispatchQueen(world, side);
+      return dispatchQueen(world, side, cmd.target);
     case 'placeLetter':
       return placeLetter(world, side, cmd.from, cmd.to);
     case 'submitWords':

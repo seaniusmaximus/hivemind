@@ -1,11 +1,14 @@
 import { create } from 'zustand';
 import {
+  activeQueenCountFor,
   applyCommand as engineApplyCommand,
+  BEE_STATS,
   buildInitialWorld,
   hexEquals,
   hexKey,
   isAdjacent,
   makeRng,
+  queenAllowanceFor,
   tickSolo,
   tickWorld,
   tileHasDraftableLetter,
@@ -119,6 +122,13 @@ interface GameStore {
    *  `TOAST_LIFETIME_MS`. New entries are appended; overflow is dropped from
    *  the head so spam doesn't leak. */
   toasts: readonly Toast[];
+  /**
+   * Queen targeting mode. After {@link dispatchQueen} is called we enter a
+   * brief window during which the player picks the queen's landing hex on
+   * the opponent grid. After {@link QUEEN_TARGETING_MS} elapses without a
+   * pick we auto-fire the queen using {@link pickQueenLandingHex}.
+   */
+  queenTargeting: { readonly startedAt: number; readonly deadline: number } | null;
 
   initSolo: (seed?: number) => void;
   tick: (dt: number) => void;
@@ -134,7 +144,17 @@ interface GameStore {
   dispatchWorker: (h: Hex, side?: Side) => void;
   /** Hold-to-send: dispatch a single-trip carpenter to the given frontier hex. */
   dispatchCarpenter: (h: Hex, side?: Side) => void;
+  /**
+   * Begin a queen dispatch. Honey/allowance preconditions are checked here so
+   * we don't enter targeting just to bounce off the engine 5 seconds later.
+   * On success this enters {@link queenTargeting}; the actual queen is sent
+   * via {@link confirmQueenTarget} (or auto-fired after the timer elapses).
+   */
   dispatchQueen: (side?: Side) => void;
+  /** Confirm the player's queen landing pick on the opponent grid. */
+  confirmQueenTarget: (target: Hex) => void;
+  /** Abort an in-progress queen targeting (e.g. user clicked the spawn button again). */
+  cancelQueenTargeting: () => void;
   /** Clear the most recent dispatch error (e.g. when the user tries again). */
   clearError: () => void;
   /** Add a contextual popup at (panel, hex). Used by UI predicates and by
@@ -218,6 +238,22 @@ const draftToWord = (world: World, side: Side, path: readonly Hex[]): string =>
 /** Held in module scope so tests can inject a fake via `_setConnection`. */
 let conn: NetConnection | null = null;
 
+/** How long the player has to pick a queen landing hex before auto-firing. */
+export const QUEEN_TARGETING_MS = 5000;
+
+/**
+ * Timer handle for the queen-targeting auto-fire fallback. Held in module
+ * scope (not in zustand state) because we never want React renders to depend
+ * on the timer's identity — it's purely a scheduling artifact.
+ */
+let queenTargetingTimer: ReturnType<typeof setTimeout> | null = null;
+const clearQueenTimer = () => {
+  if (queenTargetingTimer !== null) {
+    clearTimeout(queenTargetingTimer);
+    queenTargetingTimer = null;
+  }
+};
+
 export const useGameStore = create<GameStore>((set, get) => ({
   panel: 1,
   setPanel: (panel) => set({ panel }),
@@ -233,9 +269,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
   submitting: false,
   lastError: null,
   toasts: [],
+  queenTargeting: null,
 
   initSolo: (seed) => {
     reseed(seed ?? Date.now() & 0xffffffff);
+    clearQueenTimer();
     set({
       world: buildInitialWorld(rng),
       wordDrafts: [],
@@ -244,6 +282,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       submitting: false,
       lastError: null,
       toasts: [],
+      queenTargeting: null,
       panel: 1,
     });
   },
@@ -300,10 +339,78 @@ export const useGameStore = create<GameStore>((set, get) => ({
   },
 
   dispatchQueen: (side = 'self') => {
-    const r = get().applyCommand({ kind: 'dispatchQueen' }, side);
-    if (!r.ok && side === 'self') {
-      get().pushToast({ text: r.reason, panel: 'self-hive', hex: { q: 0, r: 0 }, variant: 'error' });
+    // Only the local player goes through targeting; opponent dispatches
+    // (AI / replays) skip straight to the engine with no target so the
+    // engine auto-picks via `pickQueenLandingHex`. We don't surface failures
+    // for the opponent — phantom toasts during AI misses are noise.
+    if (side !== 'self') {
+      get().applyCommand({ kind: 'dispatchQueen' }, side);
+      return;
     }
+    // Pre-validate so we don't enter targeting just to bounce off the engine
+    // 5 seconds later.
+    const s = get();
+    const player = s.world.self;
+    const cost = BEE_STATS.queen.honeyCost;
+    if (player.honey < cost) {
+      s.pushToast({ text: 'not enough honey', panel: 'self-hive', hex: { q: 0, r: 0 }, variant: 'error' });
+      return;
+    }
+    if (activeQueenCountFor(player) >= queenAllowanceFor(player)) {
+      s.pushToast({
+        text: 'queen allowance reached',
+        panel: 'self-hive',
+        hex: { q: 0, r: 0 },
+        variant: 'error',
+      });
+      return;
+    }
+    // Already targeting? Treat the second click as a cancel so the spawn
+    // button is its own "back out" affordance.
+    if (s.queenTargeting) {
+      get().cancelQueenTargeting();
+      return;
+    }
+    clearQueenTimer();
+    const startedAt = performance.now();
+    const deadline = startedAt + QUEEN_TARGETING_MS;
+    set({ queenTargeting: { startedAt, deadline } });
+    queenTargetingTimer = setTimeout(() => {
+      queenTargetingTimer = null;
+      // If targeting was cancelled or already confirmed, do nothing.
+      if (!get().queenTargeting) return;
+      set({ queenTargeting: null });
+      const r = get().applyCommand({ kind: 'dispatchQueen' }, 'self');
+      if (!r.ok) {
+        get().pushToast({
+          text: r.reason,
+          panel: 'self-hive',
+          hex: { q: 0, r: 0 },
+          variant: 'error',
+        });
+      }
+    }, QUEEN_TARGETING_MS);
+  },
+
+  confirmQueenTarget: (target) => {
+    const s = get();
+    if (!s.queenTargeting) return;
+    clearQueenTimer();
+    set({ queenTargeting: null });
+    const r = get().applyCommand({ kind: 'dispatchQueen', target }, 'self');
+    if (!r.ok) {
+      get().pushToast({
+        text: r.reason,
+        panel: 'opponent-hive',
+        hex: target,
+        variant: 'error',
+      });
+    }
+  },
+
+  cancelQueenTargeting: () => {
+    clearQueenTimer();
+    if (get().queenTargeting) set({ queenTargeting: null });
   },
 
   clearError: () => set({ lastError: null }),
@@ -516,10 +623,12 @@ export const useGameStore = create<GameStore>((set, get) => ({
       conn.close();
       conn = null;
     }
+    clearQueenTimer();
     set({
       mode: 'solo',
       net: { status: 'idle', lastError: null },
       room: null,
+      queenTargeting: null,
     });
     get().initSolo();
   },
@@ -656,7 +765,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
         break;
       }
       case 'GAME_OVER': {
+        clearQueenTimer();
         set((s) => ({
+          queenTargeting: null,
           room: s.room
             ? {
                 ...s.room,

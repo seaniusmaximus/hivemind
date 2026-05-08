@@ -348,6 +348,40 @@ button.ghost {
   cursor: pointer;
 }
 
+/* Queen targeting: turn the opponent grid's cursor into a target reticule and
+ * pulse the eligible landing hexes so the player can see where the queen
+ * could land. The crosshair cursor falls back gracefully on touch devices
+ * (where there is no cursor) — the visual pulse carries the affordance. */
+.hex-svg[data-queen-targeting='true'],
+.hex-svg[data-queen-targeting='true'] .hex-tile {
+  cursor: crosshair;
+}
+
+.hex-tile[data-queen-target='true'] {
+  cursor: crosshair;
+  stroke: var(--neon-magenta, #ff2bd6);
+  stroke-width: 1.6;
+  filter: drop-shadow(0 0 3px var(--neon-magenta, #ff2bd6));
+  animation: queen-target-pulse 0.9s ease-in-out infinite alternate;
+}
+
+@keyframes queen-target-pulse {
+  from {
+    stroke-opacity: 0.55;
+    filter: drop-shadow(0 0 2px rgba(255, 43, 214, 0.55));
+  }
+  to {
+    stroke-opacity: 1;
+    filter: drop-shadow(0 0 6px rgba(255, 43, 214, 0.85));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hex-tile[data-queen-target='true'] {
+    animation: none;
+  }
+}
+
 /* ---- Queen spawn banner ------------------------------------------------- *
  *
  * The big gold call-to-action sitting between the panel tabs and the panel
@@ -1004,6 +1038,20 @@ button.ghost {
   pointer-events: none;
 }
 
+.hive-honey {
+  font-family: 'Press Start 2P', system-ui, sans-serif;
+  font-size: 16px;
+  fill: #ffffff;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+  paint-order: stroke fill;
+  stroke: #2a1300;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 4px rgba(255, 196, 65, 0.55));
+}
+
 .queen-ready-glyph {
   font-size: 12px;
   text-anchor: middle;
@@ -1163,12 +1211,28 @@ button.ghost {
   z-index: 90;
 }
 
-.bee circle:first-child {
+.bee {
   filter: drop-shadow(0 0 4px currentColor);
 }
 
-.bee circle:last-child {
-  animation: bee-pulse 0.8s ease-in-out infinite alternate;
+.bee-body {
+  fill: currentColor;
+  stroke: rgba(0, 0, 0, 0.55);
+  stroke-width: 0.6;
+  stroke-linejoin: round;
+}
+
+.bee-stripe {
+  fill: rgba(0, 0, 0, 0.65);
+  pointer-events: none;
+}
+
+.bee-wing-shape {
+  fill: rgba(255, 255, 255, 0.85);
+  stroke: rgba(0, 0, 0, 0.45);
+  stroke-width: 0.5;
+  stroke-linejoin: round;
+  pointer-events: none;
 }
 
 .bee-letter {
@@ -1178,17 +1242,6 @@ button.ghost {
   text-anchor: middle;
   dominant-baseline: central;
   text-shadow: 0 0 4px currentColor;
-}
-
-@keyframes bee-pulse {
-  from {
-    r: 9;
-    opacity: 0.45;
-  }
-  to {
-    r: 14;
-    opacity: 0.15;
-  }
 }
 
 /* ---- Game over modal --------------------------------------------------- */

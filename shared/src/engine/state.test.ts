@@ -183,6 +183,73 @@ describe('engine: queen allowance scales with hive size', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('not enough honey');
   });
+
+  test('caller-supplied target lands the queen on that hex', () => {
+    const rng = fixedRng();
+    const base = buildInitialWorld(rng);
+    const w: World = {
+      ...base,
+      self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
+    };
+    const enemyActive = w.opponent.tiles.find((t) => t.state === 'active')!;
+    const r = dispatchQueen(w, 'self', enemyActive.hex);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const queen = r.world.self.bees[r.world.self.bees.length - 1]!;
+    expect(queen.kind).toBe('queen');
+    if (queen.state.kind !== 'queen-flying') {
+      throw new Error('expected queen-flying state');
+    }
+    expect(hexEquals(queen.state.landingHex, enemyActive.hex)).toBe(true);
+  });
+
+  test('in-flight queen keeps chosen landing hex across engine ticks', () => {
+    const rng = fixedRng();
+    const base = buildInitialWorld(rng);
+    const w: World = {
+      ...base,
+      self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
+    };
+    // Ring-1 storage is never `pickQueenLandingHex` (outer ring actives win),
+    // so if ticks wrongly retargeted to the auto hex, this landing would drift.
+    const inner = w.opponent.tiles.find((t) => t.state === 'storage')!;
+    const r0 = dispatchQueen(w, 'self', inner.hex);
+    expect(r0.ok).toBe(true);
+    if (!r0.ok) return;
+    let cur = r0.world;
+    const q0 = cur.self.bees[cur.self.bees.length - 1]!;
+    if (q0.state.kind !== 'queen-flying') throw new Error('expected queen-flying');
+    for (let i = 0; i < 20; i++) {
+      cur = tickWorld(cur, 1 / 30, rng);
+    }
+    const q1 = cur.self.bees.find((b) => b.id === q0.id);
+    expect(q1?.state.kind).toBe('queen-flying');
+    if (q1?.state.kind !== 'queen-flying') return;
+    expect(hexEquals(q1.state.landingHex, inner.hex)).toBe(true);
+  });
+
+  test('target on the enemy central hive is rejected', () => {
+    const base = buildInitialWorld(fixedRng());
+    const w: World = {
+      ...base,
+      self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
+    };
+    const enemyHive = w.opponent.tiles.find((t) => t.state === 'hive')!;
+    const r = dispatchQueen(w, 'self', enemyHive.hex);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('invalid queen target');
+  });
+
+  test('target that the enemy does not own is rejected', () => {
+    const base = buildInitialWorld(fixedRng());
+    const w: World = {
+      ...base,
+      self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
+    };
+    const r = dispatchQueen(w, 'self', { q: 99, r: -99 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('invalid queen target');
+  });
 });
 
 describe('engine: no time-based victory', () => {

@@ -18,6 +18,7 @@ import {
 } from '@hivemind/shared';
 import { useGameStore } from '../../state/gameStore.js';
 import { subscribeRegistry, waypointViewport } from '../../game/layout.js';
+import { BeeSprite } from './BeeSprite.js';
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
@@ -145,28 +146,15 @@ export const BeeOverlay = () => {
       {bees.map((bee) => {
         const pos = beeViewportPos(bee, t, queenAssaultHopRef.current, wallMs);
         if (!pos) return null;
-        const letter = carryingLetter(bee);
         return (
-          <g
+          <BeeSprite
             key={bee.id}
-            transform={`translate(${pos.x},${pos.y})`}
-            className="bee"
-            data-kind={bee.kind}
-            style={{ color: colorFor(bee.kind) }}
-          >
-            <circle r={6} fill="currentColor" />
-            <circle r={11} fill="none" stroke="currentColor" opacity={0.4} />
-            {bee.kind === 'queen' && (
-              <text className="bee-letter" x={0} y={-14}>
-                👑
-              </text>
-            )}
-            {letter && (
-              <text className="bee-letter" x={0} y={-14}>
-                {letter}
-              </text>
-            )}
-          </g>
+            color={colorFor(bee.kind)}
+            kind={bee.kind}
+            letter={carryingLetter(bee)}
+            x={pos.x}
+            y={pos.y}
+          />
         );
       })}
     </svg>

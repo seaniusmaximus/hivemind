@@ -35,7 +35,7 @@ export interface ActivityEntry {
 export type GameCommand =
   | { readonly kind: 'dispatchWorker'; readonly target: Hex }
   | { readonly kind: 'dispatchCarpenter'; readonly target: Hex }
-  | { readonly kind: 'dispatchQueen' }
+  | { readonly kind: 'dispatchQueen'; readonly target?: Hex }
   | { readonly kind: 'placeLetter'; readonly from: Hex; readonly to: Hex }
   | { readonly kind: 'submitWords'; readonly paths: readonly (readonly Hex[])[] };
 

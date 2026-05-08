@@ -15,7 +15,7 @@ A retro-arcade word game where you command a hive of bees to harvest letters fro
 | Build / dev          | Vite                                                | Fast HMR for tweaking neon styles & GSAP timelines                    |
 | State management     | Zustand                                             | Lightweight, no boilerplate, works well with game tick loops          |
 | Animations           | GSAP                                                | Bee flight paths, hex pulses, chain reveal timelines                  |
-| Word validation      | [dictionaryapi.dev](https://dictionaryapi.dev/)     | Cached client + server-side; whitelist for very common short words    |
+| Word validation      | [`wordlist-english`](https://www.npmjs.com/package/wordlist-english) | Bundled local SCOWL list (english + american tiers); instant, offline |
 | Multiplayer          | Node.js + `ws`                                      | Authoritative server; room codes; deterministic seeds                 |
 | Solo fallback        | Local CPU opponent                                  | Used when no websocket connection or "VS CPU" is selected             |
 | Testing              | Jest + ts-jest + React Testing Library              | Unit-test hex math, scoring, bee state machines; component snapshots  |
@@ -142,8 +142,8 @@ Mouse: drag to swipe. Touch: native swipe. Keyboard: `1/2/3` or `←/→`.
 - A **word** is a path of `letter` or `capped` tiles where consecutive tiles are hex-adjacent and form a contiguous letter sequence.
 - Like Scrabble, a single letter tile can serve as the start of multiple branching words (e.g. an `A` shared by `BAT` and `CART`). Once a tile is `capped`, it remains on the board and can be reused as a branch point in future drafts.
 - The player drafts up to **two** word paths per drone submission (drone capacity = 2). Each draft is committed when the user releases the pointer; the next pointer-down on a letter/capped tile starts the second word.
-- Each drafted word is asynchronously validated against [dictionaryapi.dev](https://dictionaryapi.dev) — results are cached for the session. The word builder shows ✓ / ✗ / `…` (pending) per word.
-- On **SUBMIT**, only valid words are dispatched to the drone. Invalid words are surfaced in the error line; their tiles stay as `letter` (not capped). On a network error the lookup falls back to "valid" so play stays unblocked offline.
+- Each drafted word is validated synchronously against the bundled [`wordlist-english`](https://www.npmjs.com/package/wordlist-english) list (every frequency tier of `english` + `american`). The word builder shows ✓ / ✗ per word — no `…` pending state, lookups are instant.
+- On **SUBMIT**, only valid words are dispatched to the drone. Invalid words are surfaced in the error line; their tiles stay as `letter` (not capped). The whole list ships in the bundle, so there is no offline-fallback edge case.
 
 ### Carpenter bees & unbounded growth
 
@@ -259,10 +259,10 @@ Implemented in `client/src/game/ai/` so single-player works without the server.
 
 ## 12. Word validation
 
-- Try `https://api.dictionaryapi.dev/api/v2/entries/en/<word>`.
-- Cache by lowercased word in `localStorage` (client) and an LRU map (server).
-- Multiplayer: client sends `SUBMIT_WORD`, server validates against cache or API and broadcasts the result.
-- Maintain a small whitelist (`shared/src/whitelist.ts`) for very common words the API sometimes 404s on.
+- Use the [`wordlist-english`](https://www.npmjs.com/package/wordlist-english) npm package as the single source of truth. The dictionary is built once at module load by unioning every frequency tier (10..70) of the `english` and `american` SCOWL lists into a `Set<string>`.
+- Both the client (`client/src/game/dictionary.ts`) and the server (`server/src/dictionary.ts`) bundle the same list and check membership synchronously — O(1) lookups, no network, no LRU cache.
+- Multiplayer: the client opportunistically pre-flags drafts (✓/✗) using the same list, but the server's `submitWords` command still re-validates authoritatively before applying any caps.
+- The shared `Set` already covers common short words and US/UK spellings; no separate whitelist is needed.
 
 ---
 
@@ -326,7 +326,7 @@ hivemind/
 
 1. **M1 — Skeleton** _(done)_: workspace scaffolding, three-panel layout, hex grid renders, Zustand store wired, jest passes.
 2. **M2 — Solo loop** _(done)_: flower spawning + regrow, hive tile + 6 storage slots + ring-2 active tiles + panel-side UI (queue, SEND WORKER, word builder), per-player letter queue with first-bee-wins races, multi-phase worker bees (hive→flower→hive→…) delivering into storage, drag-from-storage letter placement with pointer-following ghost, drag-to-form-word drone caps, cross-panel bee animations via global overlay, fixed-timestep tick loop, dummy AI.
-3. **M3 — Full mechanics** _(done)_: carpenter bees with build queue (tap frontier → SEND CARPENTER, capacity 2 per flight) for unbounded hive expansion, drone supports up to 2 word paths per flight with chain ×1.5 bonus when paths share a tile, capped tiles are reusable branch points (drafts walk through `letter` and `capped`), async dictionary validation against dictionaryapi.dev with per-session cache and ✓/✗/`…` UI on the word builder, AI also dispatches carpenters to grow its hive. Special tiles deferred to M4.
+3. **M3 — Full mechanics** _(done)_: carpenter bees with build queue (tap frontier → SEND CARPENTER, capacity 2 per flight) for unbounded hive expansion, drone supports up to 2 word paths per flight with chain ×1.5 bonus when paths share a tile, capped tiles are reusable branch points (drafts walk through `letter` and `capped`), instant local dictionary validation against the bundled `wordlist-english` list with ✓/✗ UI on the word builder, AI also dispatches carpenters to grow its hive. Special tiles deferred to M4.
 4. **M3.5 — Honey-only economy** _(done)_: HP and score variables removed; honey is the sole resource. Regen scales with owned hex count; cap scales with empty active tiles; word caps pay honey bonuses (clamped to cap).
 5. **M4 - Queen mechanic _(done)_: Added queen that can spawn and attack enemy hive. Win condition is queen touching enemy hive.
 7. **M5 — Multiplayer**: ws server, lobby, authoritative ticks, reconciliation.
