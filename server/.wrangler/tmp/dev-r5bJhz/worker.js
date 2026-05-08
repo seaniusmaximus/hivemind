@@ -1,7 +1,7 @@
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
-// server/src/lobbyDO.ts
+// src/lobbyDO.ts
 import { DurableObject } from "cloudflare:workers";
 var CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 var CODE_LEN = 6;
@@ -50,10 +50,10 @@ var mintCode = /* @__PURE__ */ __name(() => {
   return s;
 }, "mintCode");
 
-// server/src/roomDO.ts
+// src/roomDO.ts
 import { DurableObject as DurableObject2 } from "cloudflare:workers";
 
-// shared/dist/hex.js
+// ../shared/dist/hex.js
 var hex = /* @__PURE__ */ __name((q, r) => ({ q, r }), "hex");
 var hexEquals = /* @__PURE__ */ __name((a, b) => a.q === b.q && a.r === b.r, "hexEquals");
 var hexKey = /* @__PURE__ */ __name((h) => `${h.q},${h.r}`, "hexKey");
@@ -103,7 +103,7 @@ var isValidPath = /* @__PURE__ */ __name((path) => {
   return true;
 }, "isValidPath");
 
-// shared/dist/letters.js
+// ../shared/dist/letters.js
 var LETTER_STATS = {
   A: { count: 9, value: 1 },
   B: { count: 2, value: 3 },
@@ -180,19 +180,20 @@ var drawFlowerLetter = /* @__PURE__ */ __name((type, rng) => {
   return pool[0];
 }, "drawFlowerLetter");
 
-// shared/dist/bees.js
+// ../shared/dist/bees.js
 var BEE_STATS = {
   // Workers and carpenters are now single-trip dispatches: each hold-to-send
   // gesture spawns one bee that visits exactly one target and returns.
   worker: { capacity: 1, honeyCost: 3, flightSeconds: 1.5 },
   carpenter: { capacity: 1, honeyCost: 5, flightSeconds: 1.2 },
-  drone: { capacity: 2, honeyCost: 7, flightSeconds: 1.6 },
+  // Drone caps are free — words pay you, they never charge you.
+  drone: { capacity: 2, honeyCost: 0, flightSeconds: 1.6 },
   queen: { capacity: 1, honeyCost: 20, flightSeconds: 10 }
 };
 var HIVE = {
   startingHoney: 5,
   /** Honey regenerated per second, per owned hex tile. */
-  regenPerHex: 1,
+  regenPerHex: 0.04,
   /** Capacity contributed by the central hive tile itself. */
   hiveStorage: 5
 };
@@ -206,10 +207,10 @@ var FLIGHT_TIMES = {
   tileToHive: 0.7,
   /** Drone time to walk a single word path. Total cap time scales with path count. */
   cappingPerPath: 1.4,
-  queenToHive: 5
+  queenToHive: 10
 };
 
-// shared/dist/scoring.js
+// ../shared/dist/scoring.js
 var lengthMultiplier = /* @__PURE__ */ __name((length) => {
   if (length <= 4)
     return 1;
@@ -232,24 +233,21 @@ var chainScore = /* @__PURE__ */ __name((words) => {
   return Math.round(total * 1.5);
 }, "chainScore");
 
-// shared/dist/tileHp.js
+// ../shared/dist/tileHp.js
+var HEX_HP_SCALE = 2;
 var hexHpForTile = /* @__PURE__ */ __name((tile) => {
-  if (!tile.letter)
-    return 1;
-  if (tile.state !== "capped")
-    return 2;
-  return 4 + (tile.reuseCount ?? 0) * 2;
+  const base = !tile.letter ? 1 : tile.state !== "capped" ? 2 : 4 + (tile.reuseCount ?? 0) * 2;
+  return base * HEX_HP_SCALE;
 }, "hexHpForTile");
 
-// shared/dist/engine/state.js
+// ../shared/dist/engine/state.js
 var HIVE_RADIUS = 2;
 var FIELD_RADIUS = 4;
 var PATCH_RESPAWN_SECONDS = 1.5;
 var PATCH_LIFETIME_SECONDS = 28;
 var PATCH_MIN_CENTER_DISTANCE = 3;
-var ROUND_DURATION_SECONDS = 5 * 60;
-var QUEEN_LIFETIME_SECONDS = 10;
-var QUEEN_ACTION_INTERVAL_SECONDS = 0.45;
+var QUEEN_ASSAULT_DURATION_SECONDS = 5;
+var QUEEN_ACTION_INTERVAL_SECONDS = 0.72;
 var FREED_LETTER_LIFETIME_SECONDS = 6;
 var LOG_MAX_ENTRIES = 14;
 var PATCH_TYPES = ["vowel", "common", "rare"];
@@ -263,6 +261,12 @@ var cubeDistance = /* @__PURE__ */ __name((a, b) => {
   const bz = -b.q - b.r;
   return (Math.abs(a.q - b.q) + Math.abs(a.r - b.r) + Math.abs(az - bz)) / 2;
 }, "cubeDistance");
+var pickQueenLandingHex = /* @__PURE__ */ __name((defender) => defender.tiles.filter((t) => t.state !== "hive").sort((a, b) => {
+  const d = cubeDistance(b.hex, hex(0, 0)) - cubeDistance(a.hex, hex(0, 0));
+  if (d !== 0)
+    return d;
+  return hexKey(a.hex).localeCompare(hexKey(b.hex));
+})[0]?.hex ?? null, "pickQueenLandingHex");
 var buildPlayer = /* @__PURE__ */ __name((id) => {
   const tiles = [];
   for (const h of range(hex(0, 0), HIVE_RADIUS)) {
@@ -401,7 +405,7 @@ var tickWorld = /* @__PURE__ */ __name((world, dt, rng) => {
   next = tickQueens(next);
   next = tickFreedLetters(next);
   next = tickPatches(next, dt, rng);
-  return checkVictory(next);
+  return next;
 }, "tickWorld");
 var tickFreedLetters = /* @__PURE__ */ __name((world) => {
   const trim = /* @__PURE__ */ __name((letters) => letters.filter((l) => l.witherAt > world.t), "trim");
@@ -454,20 +458,10 @@ var tickPatches = /* @__PURE__ */ __name((world, dt, rng) => {
   }
   return next;
 }, "tickPatches");
-var checkVictory = /* @__PURE__ */ __name((world) => {
-  if (world.t < ROUND_DURATION_SECONDS)
-    return world;
-  let winner = null;
-  if (world.self.honey > world.opponent.honey)
-    winner = "self";
-  else if (world.opponent.honey > world.self.honey)
-    winner = "opponent";
-  else if (world.self.tiles.length > world.opponent.tiles.length)
-    winner = "self";
-  else if (world.opponent.tiles.length > world.self.tiles.length)
-    winner = "opponent";
-  return { ...world, phase: "over", winner };
-}, "checkVictory");
+function tileHasDraftableLetter(tile) {
+  return !!tile?.letter && (tile.state === "capped" || tile.state === "letter" || tile.state === "active" && !!tile.letter);
+}
+__name(tileHasDraftableLetter, "tileHasDraftableLetter");
 var resolveArrivedBees = /* @__PURE__ */ __name((world) => {
   let next = world;
   for (const side of ["self", "opponent"]) {
@@ -485,6 +479,32 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
   for (const bee of player.bees) {
     const arrival = arrivalOf(bee);
     if (arrival === null || arrival > world.t) {
+      if (bee.state.kind === "queen-flying" && (!Number.isFinite(bee.state.expiresAt) || world.t >= bee.state.expiresAt)) {
+        beesChanged = true;
+        continue;
+      }
+      if (bee.state.kind === "queen-flying") {
+        const defender = world[otherSide(side)];
+        const desired = pickQueenLandingHex(defender);
+        if (!desired) {
+          beesChanged = true;
+          continue;
+        }
+        const f = bee.state.flight;
+        const needRetarget = !hexEquals(desired, bee.state.landingHex) || !hexEquals(desired, f.to.hex);
+        const nextState = needRetarget ? {
+          ...bee.state,
+          landingHex: desired,
+          flight: {
+            ...f,
+            to: { panel: bee.state.assaultPanel, hex: desired }
+          }
+        } : bee.state;
+        if (needRetarget)
+          beesChanged = true;
+        remainingBees.push({ ...bee, state: nextState });
+        continue;
+      }
       remainingBees.push(bee);
       continue;
     }
@@ -672,7 +692,7 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
         const cappedHitsThisPath = [];
         for (const h of path) {
           const tile = updatedPlayer.tiles.find((t) => hexEquals(t.hex, h));
-          if (!tile || tile.state !== "letter" && tile.state !== "capped" || !tile.letter) {
+          if (!tile || !tileHasDraftableLetter(tile)) {
             valid = false;
             break;
           }
@@ -803,14 +823,18 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
       continue;
     }
     if (bee.state.kind === "queen-flying") {
+      if (!Number.isFinite(bee.state.expiresAt) || world.t >= bee.state.expiresAt) {
+        beesChanged = true;
+        continue;
+      }
       remainingBees.push({
         ...bee,
         state: {
           kind: "queen-assault",
           panel: bee.state.assaultPanel,
           currentHex: bee.state.landingHex,
-          expiresAt: bee.state.expiresAt,
-          nextActionAt: next.t + 0.25
+          expiresAt: next.t + QUEEN_ASSAULT_DURATION_SECONDS,
+          nextActionAt: next.t + 0.45
         }
       });
       next = logEvent(next, {
@@ -835,39 +859,50 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
   }
   return next;
 }, "resolveSideBees");
-var firstStepTowardHive = /* @__PURE__ */ __name((player, from) => {
+var shortestQueenHopTowardHive = /* @__PURE__ */ __name((defender, from) => {
   const goal = hex(0, 0);
-  const ownedTiles = new Map(player.tiles.map((t) => [hexKey(t.hex), t.hex]));
-  if (!ownedTiles.has(hexKey(goal)))
+  const tileByHex = new Map(defender.tiles.map((t) => [hexKey(t.hex), t]));
+  const goalKey = hexKey(goal);
+  if (!tileByHex.has(goalKey))
     return null;
+  const maxHullRadius = defender.tiles.reduce((m, t) => Math.max(m, cubeDistance(t.hex, goal)), 0);
+  const maxVoidReach = Math.max(maxHullRadius + 32, 32);
+  const visitBudget = Math.min(6e4, defender.tiles.length * 96 + 2048);
   const dist = /* @__PURE__ */ new Map();
-  dist.set(hexKey(goal), 0);
+  dist.set(goalKey, 0);
   const q = [goal];
-  while (q.length > 0) {
+  let visits = 0;
+  while (q.length > 0 && visits < visitBudget) {
+    visits++;
     const cur = q.shift();
-    const d = dist.get(hexKey(cur));
-    for (const n of neighbors(cur)) {
-      const nk = hexKey(n);
-      if (!ownedTiles.has(nk) || dist.has(nk))
+    const dc = dist.get(hexKey(cur));
+    const nextDc = dc + 1;
+    for (const nbr of neighbors(cur)) {
+      const nk = hexKey(nbr);
+      if (dist.has(nk))
         continue;
-      dist.set(nk, d + 1);
-      q.push(n);
+      if (cubeDistance(nbr, goal) > maxVoidReach)
+        continue;
+      dist.set(nk, nextDc);
+      q.push(nbr);
     }
   }
+  if (!dist.has(hexKey(from)))
+    return null;
   let best = null;
-  let bestDist = Infinity;
-  for (const n of neighbors(from)) {
-    const nk = hexKey(n);
+  let bestD = Infinity;
+  for (const nbr of neighbors(from)) {
+    const nk = hexKey(nbr);
     const d = dist.get(nk);
     if (d === void 0)
       continue;
-    if (d < bestDist) {
-      bestDist = d;
-      best = ownedTiles.get(nk) ?? n;
+    if (best === null || d < bestD || d === bestD && nk.localeCompare(hexKey(best)) < 0) {
+      bestD = d;
+      best = nbr;
     }
   }
   return best;
-}, "firstStepTowardHive");
+}, "shortestQueenHopTowardHive");
 var destroyTile = /* @__PURE__ */ __name((player, h, t) => {
   const tile = player.tiles.find((x) => hexEquals(x.hex, h));
   if (!tile || tile.state === "hive")
@@ -899,13 +934,44 @@ var tickQueens = /* @__PURE__ */ __name((world) => {
         continue;
       }
       dirty = true;
-      if (next.t >= bee.state.expiresAt)
+      if (!Number.isFinite(bee.state.expiresAt) || next.t >= bee.state.expiresAt)
         continue;
       if (next.t < bee.state.nextActionAt) {
         bees.push(bee);
         continue;
       }
-      const step = firstStepTowardHive(defender, bee.state.currentHex);
+      const ch = bee.state.currentHex;
+      const tileHere = defender.tiles.find((t) => hexEquals(t.hex, ch));
+      if (tileHere?.state === "hive") {
+        next = logEvent(next, {
+          t: next.t,
+          ownerId: attacker.id,
+          text: `queen breached hive!`
+        });
+        return { ...next, phase: "over", winner: side };
+      }
+      if (tileHere) {
+        const nextDamage2 = (tileHere.damage ?? 0) + 1;
+        if (nextDamage2 >= hexHpForTile(tileHere)) {
+          defender = destroyTile(defender, ch, next.t);
+          next = logEvent(next, {
+            t: next.t,
+            ownerId: attacker.id,
+            text: `queen smashed ${tileHere.letter ?? "tile"}`
+          });
+        } else {
+          defender = {
+            ...defender,
+            tiles: defender.tiles.map((t) => hexEquals(t.hex, ch) ? { ...t, damage: nextDamage2 } : t)
+          };
+        }
+        bees.push({
+          ...bee,
+          state: { ...bee.state, nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS }
+        });
+        continue;
+      }
+      const step = shortestQueenHopTowardHive(defender, ch);
       if (!step) {
         bees.push({
           ...bee,
@@ -1030,7 +1096,7 @@ var dispatchQueen = /* @__PURE__ */ __name((world, side) => {
   if (alreadyPresent)
     return { ok: false, world, reason: "queen already active" };
   const enemy = world[otherSide(side)];
-  const landing = enemy.tiles.filter((t) => t.state !== "hive").sort((a, b) => cubeDistance(b.hex, hex(0, 0)) - cubeDistance(a.hex, hex(0, 0)))[0]?.hex;
+  const landing = pickQueenLandingHex(enemy);
   if (!landing)
     return { ok: false, world, reason: "enemy hive unavailable" };
   const ownerPanel = sideHivePanel(side);
@@ -1044,7 +1110,7 @@ var dispatchQueen = /* @__PURE__ */ __name((world, side) => {
       kind: "queen-flying",
       assaultPanel: enemyPanel,
       landingHex: landing,
-      expiresAt: world.t + FLIGHT_TIMES.queenToHive + QUEEN_LIFETIME_SECONDS,
+      expiresAt: world.t + FLIGHT_TIMES.queenToHive + QUEEN_ASSAULT_DURATION_SECONDS,
       flight: flight(ownerPanel, hex(0, 0), enemyPanel, landing, world.t, FLIGHT_TIMES.queenToHive)
     }
   };
@@ -1056,23 +1122,41 @@ var dispatchQueen = /* @__PURE__ */ __name((world, side) => {
   return { ok: true, world: setPlayer(world, side, updated) };
 }, "dispatchQueen");
 var placeLetter = /* @__PURE__ */ __name((world, side, fromHex, toHex) => {
+  if (hexEquals(fromHex, toHex)) {
+    return { ok: false, world, reason: "source and destination are the same" };
+  }
   const player = world[side];
   const source = player.tiles.find((t) => hexEquals(t.hex, fromHex));
-  if (!source || source.state !== "storage" || !source.letter) {
-    return { ok: false, world, reason: "no letter in that storage slot" };
-  }
   const dest = player.tiles.find((t) => hexEquals(t.hex, toHex));
-  if (!dest || dest.state !== "active" || dest.letter) {
-    return { ok: false, world, reason: "destination is not an empty active tile" };
+  if (!source?.letter) {
+    return { ok: false, world, reason: "no letter at source" };
+  }
+  if (source.state === "capped") {
+    return { ok: false, world, reason: "capped letters cannot be moved" };
+  }
+  const fromStorage = source.state === "storage";
+  const fromGrid = source.state === "active" && source.letter || source.state === "letter" && source.letter;
+  if (!fromStorage && !fromGrid) {
+    return { ok: false, world, reason: "invalid source for letter move" };
+  }
+  if (!dest || dest.letter) {
+    return { ok: false, world, reason: "destination already holds a letter" };
+  }
+  if (dest.state !== "active" && dest.state !== "storage") {
+    return { ok: false, world, reason: "destination is not a letter slot" };
   }
   const letter = source.letter;
   const updated = {
     ...player,
     tiles: player.tiles.map((t) => {
-      if (hexEquals(t.hex, fromHex))
-        return { ...t, letter: null };
-      if (hexEquals(t.hex, toHex))
-        return { ...t, state: "letter", letter };
+      if (hexEquals(t.hex, fromHex)) {
+        if (fromStorage)
+          return { ...t, letter: null };
+        return { ...t, state: "active", letter: null };
+      }
+      if (hexEquals(t.hex, toHex)) {
+        return dest.state === "storage" ? { ...t, letter } : { ...t, state: "active", letter };
+      }
       return t;
     })
   };
@@ -1096,7 +1180,7 @@ var trySubmitWord = /* @__PURE__ */ __name((world, side, paths) => {
     const placements = [];
     for (const h of path) {
       const tile = player.tiles.find((t) => hexEquals(t.hex, h));
-      if (!tile || tile.state !== "letter" && tile.state !== "capped" || !tile.letter) {
+      if (!tile || !tileHasDraftableLetter(tile)) {
         return { ok: false, world, reason: "path includes a non-letter tile" };
       }
       letters.push(tile.letter);
@@ -1239,7 +1323,7 @@ var worldToSnapshot = /* @__PURE__ */ __name((world, viewerSide, tick) => {
   };
 }, "worldToSnapshot");
 
-// server/src/gameLoop.ts
+// src/gameLoop.ts
 var DEFAULT_TICK_HZ = 30;
 var DEFAULT_SNAPSHOT_HZ = 15;
 var createGameLoop = /* @__PURE__ */ __name((opts, port) => {
@@ -1279,9 +1363,6 @@ var createGameLoop = /* @__PURE__ */ __name((opts, port) => {
       });
     }
   }, "broadcastSnapshot");
-  const gameOverReason = /* @__PURE__ */ __name(() => {
-    return world.t >= ROUND_DURATION_SECONDS ? "time" : "queen";
-  }, "gameOverReason");
   const sendGameOver = /* @__PURE__ */ __name((reason) => {
     if (gameOverSent) return;
     gameOverSent = true;
@@ -1297,7 +1378,7 @@ var createGameLoop = /* @__PURE__ */ __name((opts, port) => {
   const maybeEmitGameOver = /* @__PURE__ */ __name(() => {
     if (gameOverSent) return;
     if (world.phase !== "over") return;
-    sendGameOver(gameOverReason());
+    sendGameOver("queen");
   }, "maybeEmitGameOver");
   const ack = /* @__PURE__ */ __name((playerId, commandId, ok, reason) => {
     port.sendTo(playerId, {
@@ -1317,7 +1398,7 @@ var createGameLoop = /* @__PURE__ */ __name((opts, port) => {
       const letters = [];
       for (const h of path) {
         const tile = owner.tiles.find((t) => hexEquals(t.hex, h));
-        if (!tile || tile.state !== "letter" && tile.state !== "capped" || !tile.letter) {
+        if (!tile || !tileHasDraftableLetter(tile)) {
           return null;
         }
         letters.push(tile.letter);
@@ -1418,7 +1499,7 @@ var createGameLoop = /* @__PURE__ */ __name((opts, port) => {
   };
 }, "createGameLoop");
 
-// server/src/dictionary.ts
+// src/dictionary.ts
 var CACHE_MAX = 5e3;
 var cache = /* @__PURE__ */ new Map();
 var cacheGet = /* @__PURE__ */ __name((key) => {
@@ -1452,7 +1533,7 @@ var isWord = /* @__PURE__ */ __name(async (raw) => {
   }
 }, "isWord");
 
-// server/src/roomDO.ts
+// src/roomDO.ts
 var newPlayerId = /* @__PURE__ */ __name(() => Math.random().toString(36).slice(2, 10), "newPlayerId");
 var sendJson = /* @__PURE__ */ __name((socket, msg) => {
   if (socket.readyState === WebSocket.READY_STATE_OPEN) {
@@ -1514,13 +1595,25 @@ var RoomDO = class extends DurableObject2 {
       sendTo: /* @__PURE__ */ __name((playerId, msg) => {
         const target = this.players.find((p) => p.id === playerId);
         if (target) sendJson(target.socket, msg);
+        if (msg.type === "GAME_OVER") this.handleGameOver();
       }, "sendTo"),
       validateWord: isWord
     };
   }
+  /** Idempotent: the loop emits GAME_OVER once per player; we only act once. */
+  handleGameOver() {
+    if (this.phase === "over") return;
+    this.phase = "over";
+    for (const p of this.players) p.ready = false;
+    this.sendRoomState();
+  }
   startGame() {
     const [host, joiner] = this.players;
     if (!host || !joiner) return;
+    if (this.loop) {
+      this.loop.stop();
+      this.loop = null;
+    }
     host.side = "self";
     joiner.side = "opponent";
     this.phase = "countdown";
@@ -1591,9 +1684,10 @@ var RoomDO = class extends DurableObject2 {
       case "READY": {
         const player = this.players.find((p) => p.socket === socket);
         if (!player) return;
+        if (this.phase !== "lobby" && this.phase !== "over") return;
         player.ready = true;
         this.sendRoomState();
-        if (this.phase === "lobby" && this.players.length === 2 && this.players.every((p) => p.ready)) {
+        if (this.players.length === 2 && this.players.every((p) => p.ready)) {
           this.startGame();
         }
         break;
@@ -1647,7 +1741,7 @@ var RoomDO = class extends DurableObject2 {
   }
 };
 
-// server/src/worker.ts
+// src/worker.ts
 var lobbyStub = /* @__PURE__ */ __name((env) => env.LOBBY.get(env.LOBBY.idFromName("singleton")), "lobbyStub");
 var ROOM_CODE_RE = /^\/ws\/([A-Z0-9]{4,8})$/i;
 var worker_default = {
@@ -1678,9 +1772,180 @@ var worker_default = {
     return env.ASSETS.fetch(request);
   }
 };
+
+// ../node_modules/wrangler/templates/middleware/middleware-ensure-req-body-drained.ts
+var drainBody = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx) => {
+  try {
+    return await middlewareCtx.next(request, env);
+  } finally {
+    try {
+      if (request.body !== null && !request.bodyUsed) {
+        const reader = request.body.getReader();
+        while (!(await reader.read()).done) {
+        }
+      }
+    } catch (e) {
+      console.error("Failed to drain the unused request body.", e);
+    }
+  }
+}, "drainBody");
+var middleware_ensure_req_body_drained_default = drainBody;
+
+// ../node_modules/wrangler/templates/middleware/middleware-miniflare3-json-error.ts
+function reduceError(e) {
+  return {
+    name: e?.name,
+    message: e?.message ?? String(e),
+    stack: e?.stack,
+    cause: e?.cause === void 0 ? void 0 : reduceError(e.cause)
+  };
+}
+__name(reduceError, "reduceError");
+var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx) => {
+  try {
+    return await middlewareCtx.next(request, env);
+  } catch (e) {
+    const error = reduceError(e);
+    return Response.json(error, {
+      status: 500,
+      headers: { "MF-Experimental-Error-Stack": "true" }
+    });
+  }
+}, "jsonError");
+var middleware_miniflare3_json_error_default = jsonError;
+
+// .wrangler/tmp/bundle-epq71o/middleware-insertion-facade.js
+var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
+  middleware_ensure_req_body_drained_default,
+  middleware_miniflare3_json_error_default
+];
+var middleware_insertion_facade_default = worker_default;
+
+// ../node_modules/wrangler/templates/middleware/common.ts
+var __facade_middleware__ = [];
+function __facade_register__(...args) {
+  __facade_middleware__.push(...args.flat());
+}
+__name(__facade_register__, "__facade_register__");
+function __facade_invokeChain__(request, env, ctx, dispatch, middlewareChain) {
+  const [head, ...tail] = middlewareChain;
+  const middlewareCtx = {
+    dispatch,
+    next(newRequest, newEnv) {
+      return __facade_invokeChain__(newRequest, newEnv, ctx, dispatch, tail);
+    }
+  };
+  return head(request, env, ctx, middlewareCtx);
+}
+__name(__facade_invokeChain__, "__facade_invokeChain__");
+function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
+  return __facade_invokeChain__(request, env, ctx, dispatch, [
+    ...__facade_middleware__,
+    finalMiddleware
+  ]);
+}
+__name(__facade_invoke__, "__facade_invoke__");
+
+// .wrangler/tmp/bundle-epq71o/middleware-loader.entry.ts
+var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
+  constructor(scheduledTime, cron, noRetry) {
+    this.scheduledTime = scheduledTime;
+    this.cron = cron;
+    this.#noRetry = noRetry;
+  }
+  static {
+    __name(this, "__Facade_ScheduledController__");
+  }
+  #noRetry;
+  noRetry() {
+    if (!(this instanceof ___Facade_ScheduledController__)) {
+      throw new TypeError("Illegal invocation");
+    }
+    this.#noRetry();
+  }
+};
+function wrapExportedHandler(worker) {
+  if (__INTERNAL_WRANGLER_MIDDLEWARE__ === void 0 || __INTERNAL_WRANGLER_MIDDLEWARE__.length === 0) {
+    return worker;
+  }
+  for (const middleware of __INTERNAL_WRANGLER_MIDDLEWARE__) {
+    __facade_register__(middleware);
+  }
+  const fetchDispatcher = /* @__PURE__ */ __name(function(request, env, ctx) {
+    if (worker.fetch === void 0) {
+      throw new Error("Handler does not export a fetch() function.");
+    }
+    return worker.fetch(request, env, ctx);
+  }, "fetchDispatcher");
+  return {
+    ...worker,
+    fetch(request, env, ctx) {
+      const dispatcher = /* @__PURE__ */ __name(function(type, init) {
+        if (type === "scheduled" && worker.scheduled !== void 0) {
+          const controller = new __Facade_ScheduledController__(
+            Date.now(),
+            init.cron ?? "",
+            () => {
+            }
+          );
+          return worker.scheduled(controller, env, ctx);
+        }
+      }, "dispatcher");
+      return __facade_invoke__(request, env, ctx, dispatcher, fetchDispatcher);
+    }
+  };
+}
+__name(wrapExportedHandler, "wrapExportedHandler");
+function wrapWorkerEntrypoint(klass) {
+  if (__INTERNAL_WRANGLER_MIDDLEWARE__ === void 0 || __INTERNAL_WRANGLER_MIDDLEWARE__.length === 0) {
+    return klass;
+  }
+  for (const middleware of __INTERNAL_WRANGLER_MIDDLEWARE__) {
+    __facade_register__(middleware);
+  }
+  return class extends klass {
+    #fetchDispatcher = /* @__PURE__ */ __name((request, env, ctx) => {
+      this.env = env;
+      this.ctx = ctx;
+      if (super.fetch === void 0) {
+        throw new Error("Entrypoint class does not define a fetch() function.");
+      }
+      return super.fetch(request);
+    }, "#fetchDispatcher");
+    #dispatcher = /* @__PURE__ */ __name((type, init) => {
+      if (type === "scheduled" && super.scheduled !== void 0) {
+        const controller = new __Facade_ScheduledController__(
+          Date.now(),
+          init.cron ?? "",
+          () => {
+          }
+        );
+        return super.scheduled(controller);
+      }
+    }, "#dispatcher");
+    fetch(request) {
+      return __facade_invoke__(
+        request,
+        this.env,
+        this.ctx,
+        this.#dispatcher,
+        this.#fetchDispatcher
+      );
+    }
+  };
+}
+__name(wrapWorkerEntrypoint, "wrapWorkerEntrypoint");
+var WRAPPED_ENTRY;
+if (typeof middleware_insertion_facade_default === "object") {
+  WRAPPED_ENTRY = wrapExportedHandler(middleware_insertion_facade_default);
+} else if (typeof middleware_insertion_facade_default === "function") {
+  WRAPPED_ENTRY = wrapWorkerEntrypoint(middleware_insertion_facade_default);
+}
+var middleware_loader_entry_default = WRAPPED_ENTRY;
 export {
   LobbyDO,
   RoomDO,
-  worker_default as default
+  __INTERNAL_WRANGLER_MIDDLEWARE__,
+  middleware_loader_entry_default as default
 };
 //# sourceMappingURL=worker.js.map

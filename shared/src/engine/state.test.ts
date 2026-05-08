@@ -17,7 +17,6 @@ import {
   worldToSnapshot,
   PATCH_LIFETIME_SECONDS,
   PATCH_TARGET_COUNT,
-  ROUND_DURATION_SECONDS,
   type World,
 } from './state.js';
 
@@ -97,9 +96,10 @@ describe('engine: honey economy', () => {
     // Burn the starting honey down so regen has room.
     w = { ...w, self: { ...w.self, honey: 0 }, opponent: { ...w.opponent, honey: 0 } };
     const after = advance(w, 4.0, rng);
-    const expected = honeyRateFor(w.self) * 4.0;
-    // Allow a small slack for floating-point + AI side-effects (the AI mutates
-    // its own honey by spawning bees, but never affects ours).
+    // Linear projection bounded by the cap — works for any `regenPerHex`
+    // setting (designers retune it freely).
+    const projected = honeyRateFor(w.self) * 4.0;
+    const expected = Math.min(projected, honeyCapFor(w.self));
     expect(after.self.honey).toBeGreaterThan(expected - 0.5);
     expect(after.self.honey).toBeLessThanOrEqual(honeyCapFor(after.self) + 1e-6);
   });
@@ -114,52 +114,18 @@ describe('engine: honey economy', () => {
   });
 });
 
-describe('engine: victory', () => {
-  test('round expires → highest honey wins', () => {
+describe('engine: no time-based victory', () => {
+  test('long simulations leave phase === "playing" when nobody breaches', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
     w = {
       ...w,
-      t: ROUND_DURATION_SECONDS - 0.001,
+      t: 10 * 60,
       self: { ...w.self, honey: 50 },
       opponent: { ...w.opponent, honey: 5 },
     };
     const after = tickWorld(w, 0.05, rng);
-    expect(after.phase).toBe('over');
-    expect(after.winner).toBe('self');
-  });
-
-  test('round expires with equal honey → larger hive wins', () => {
-    const rng = fixedRng();
-    let w = buildInitialWorld(rng);
-    // Give opponent a bonus tile to outsize self.
-    const extraHex = hex(3, -2);
-    w = {
-      ...w,
-      t: ROUND_DURATION_SECONDS - 0.001,
-      self: { ...w.self, honey: 10 },
-      opponent: {
-        ...w.opponent,
-        honey: 10,
-        tiles: [...w.opponent.tiles, { hex: extraHex, state: 'active', letter: null }],
-      },
-    };
-    const after = tickWorld(w, 0.05, rng);
-    expect(after.phase).toBe('over');
-    expect(after.winner).toBe('opponent');
-  });
-
-  test('round expires with equal honey and equal hive size → stalemate', () => {
-    const rng = fixedRng();
-    let w = buildInitialWorld(rng);
-    w = {
-      ...w,
-      t: ROUND_DURATION_SECONDS - 0.001,
-      self: { ...w.self, honey: 12 },
-      opponent: { ...w.opponent, honey: 12 },
-    };
-    const after = tickWorld(w, 0.05, rng);
-    expect(after.phase).toBe('over');
+    expect(after.phase).toBe('playing');
     expect(after.winner).toBeNull();
   });
 });
@@ -334,8 +300,8 @@ describe('engine: race for the same petal', () => {
   });
 });
 
-describe('engine: placeLetter (storage → active)', () => {
-  test('moves the letter, locks it onto the active tile, leaves storage empty', () => {
+describe('engine: placeLetter (storage ↔ comb)', () => {
+  test('moves the letter onto the comb as active+letter, leaves storage empty', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
     const storage = w.self.tiles.find((t) => t.state === 'storage')!;
@@ -356,8 +322,32 @@ describe('engine: placeLetter (storage → active)', () => {
     const movedDest = r.world.self.tiles.find((t) => hexEquals(t.hex, active.hex))!;
     expect(movedSource.state).toBe('storage');
     expect(movedSource.letter).toBe(null);
-    expect(movedDest.state).toBe('letter');
+    expect(movedDest.state).toBe('active');
     expect(movedDest.letter).toBe('C');
+  });
+
+  test('can move an uncapped comb letter back into empty storage', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const storage = w.self.tiles.find((t) => t.state === 'storage' && !t.letter)!;
+    const active = w.self.tiles.find((t) => t.state === 'active')!;
+    w = {
+      ...w,
+      self: {
+        ...w.self,
+        tiles: w.self.tiles.map((t) => {
+          if (hexEquals(t.hex, active.hex)) return { ...t, state: 'active' as const, letter: 'Z' as const };
+          return t;
+        }),
+      },
+    };
+    const r = placeLetter(w, 'self', active.hex, storage.hex);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const src = r.world.self.tiles.find((t) => hexEquals(t.hex, active.hex))!;
+    const dest = r.world.self.tiles.find((t) => hexEquals(t.hex, storage.hex))!;
+    expect(src.letter).toBe(null);
+    expect(dest.letter).toBe('Z');
   });
 
   test('refuses if storage is empty', () => {
@@ -378,7 +368,7 @@ describe('engine: placeLetter (storage → active)', () => {
         ...w.self,
         tiles: w.self.tiles.map((t) => {
           if (hexEquals(t.hex, storage.hex)) return { ...t, letter: 'A' as const };
-          if (hexEquals(t.hex, active.hex)) return { ...t, state: 'letter' as const, letter: 'B' as const };
+          if (hexEquals(t.hex, active.hex)) return { ...t, state: 'active' as const, letter: 'B' as const };
           return t;
         }),
       },
@@ -411,12 +401,12 @@ describe('engine: drone caps a placed word', () => {
     const submit = trySubmitWord(w, 'self', [path]);
     expect(submit.ok).toBe(true);
     if (!submit.ok) return;
-    // Drone cost (7) is deducted immediately on submit.
-    expect(submit.world.self.honey).toBe(1);
+    // Drone caps are free; honey is unchanged at submit time.
+    expect(submit.world.self.honey).toBe(8);
     const after = advance(submit.world, 3.0, rng);
     // CAT scores 5; bonus + a sliver of regen should leave us above the
-    // post-deduct baseline.
-    expect(after.self.honey).toBeGreaterThan(5);
+    // pre-submit baseline.
+    expect(after.self.honey).toBeGreaterThan(12);
     expect(after.self.tiles.filter((t) => t.state === 'capped')).toHaveLength(3);
     // Opponent's resource pool is no longer tied to our caps. Their honey may
     // still drift via passive regen, but it never *drops*.
@@ -435,8 +425,7 @@ describe('engine: chain bonus on shared tile', () => {
       ...w,
       self: {
         ...w.self,
-        // Just enough to afford the drone (7); leaves headroom under the cap
-        // for the entire +15 bonus to land.
+        // Low starting honey so the +15 chain bonus has headroom under the cap.
         honey: 8,
         tiles: w.self.tiles.map((t) => {
           if (hexEquals(t.hex, w1[0])) return { ...t, state: 'letter', letter: 'C' };
@@ -451,7 +440,7 @@ describe('engine: chain bonus on shared tile', () => {
     const submit = trySubmitWord(w, 'self', [w1, w2]);
     expect(submit.ok).toBe(true);
     if (!submit.ok) return;
-    expect(submit.world.self.honey).toBe(1);
+    expect(submit.world.self.honey).toBe(8);
     const after = advance(submit.world, 4.0, rng);
     // CAT (5) + TAB (5) = 10 baseline; chain ×1.5 → 15. Floor allowing for
     // some passive regen before the bonus lands and any chain-bonus log
@@ -489,7 +478,7 @@ describe('engine: chain bonus on shared tile', () => {
     if (!submit.ok) return;
     const after = advance(submit.world, 4.0, rng);
     // AT (2) + BE (4) = 6 baseline, no chain bonus, no chain tag in log.
-    expect(after.self.honey).toBeGreaterThanOrEqual(7); // 1 (post-drone) + 6
+    expect(after.self.honey).toBeGreaterThanOrEqual(14); // 8 (no drone cost) + 6
     expect(after.log.every((e) => !e.text.includes('chain'))).toBe(true);
   });
 });

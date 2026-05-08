@@ -87,7 +87,7 @@ export const WordBuilderPanel = () => {
           aria-label="Submit words"
         >
           {submitting ? 'CHECKING…' : 'SUBMIT'}
-          <span className="hud-action-cost">{cost}🜨</span>
+          {cost > 0 ? <span className="hud-action-cost">{cost}🜨</span> : null}
         </button>
         <button
           type="button"

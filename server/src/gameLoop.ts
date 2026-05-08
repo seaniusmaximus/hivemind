@@ -10,7 +10,7 @@
  *   `submitWords` which awaits per-path dictionary validation before applying
  *   the surviving paths.
  * - Emits `GAME_OVER` exactly once when the engine flips `world.phase` to
- *   `'over'` (timer expired or queen breach).
+ *   `'over'` (queen breach) or a player forfeits.
  *
  * The loop has no opinion on transport. It talks to the outside through
  * {@link GameLoopPort}, which `rooms.ts` bridges to the live WebSocket and
@@ -23,8 +23,8 @@ import {
   buildInitialWorld,
   hexEquals,
   makeRng,
-  ROUND_DURATION_SECONDS,
   tickWorld,
+  tileHasDraftableLetter,
   worldToSnapshot,
   type GameCommand,
   type Letter,
@@ -138,13 +138,7 @@ export const createGameLoop = (
     }
   };
 
-  const gameOverReason = (): 'time' | 'queen' => {
-    // Timer-expired check matches the engine's checkVictory threshold; any
-    // earlier game-over necessarily came from a queen breach in tickQueens.
-    return world.t >= ROUND_DURATION_SECONDS ? 'time' : 'queen';
-  };
-
-  const sendGameOver = (reason: 'time' | 'queen' | 'forfeit') => {
+  const sendGameOver = (reason: 'queen' | 'forfeit') => {
     if (gameOverSent) return;
     gameOverSent = true;
     const winnerId =
@@ -161,7 +155,9 @@ export const createGameLoop = (
   const maybeEmitGameOver = () => {
     if (gameOverSent) return;
     if (world.phase !== 'over') return;
-    sendGameOver(gameOverReason());
+    // The engine only flips `phase` to `'over'` via a queen breach now;
+    // forfeits are routed through `forfeit()` directly.
+    sendGameOver('queen');
   };
 
   const ack = (playerId: string, commandId: string, ok: boolean, reason?: string) => {
@@ -193,11 +189,7 @@ export const createGameLoop = (
       const letters: Letter[] = [];
       for (const h of path) {
         const tile = owner.tiles.find((t) => hexEquals(t.hex, h));
-        if (
-          !tile ||
-          (tile.state !== 'letter' && tile.state !== 'capped') ||
-          !tile.letter
-        ) {
+        if (!tile || !tileHasDraftableLetter(tile)) {
           return null;
         }
         letters.push(tile.letter);

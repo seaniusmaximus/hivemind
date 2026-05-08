@@ -184,14 +184,15 @@ Honey from word caps is **clipped at the cap**: spamming words while you're alre
 
 ## 7. Win condition
 
-Pure honey race against the clock:
+Queen-breach only:
 
-- **Time limit**: 5-minute round.
-- **Win**: highest honey total when the timer expires.
-- **Tiebreaker 1**: largest hive (most owned tiles).
-- **Tiebreaker 2**: stalemate.
+- **No time limit.** Matches run until a winner emerges.
+- **Win**: dispatch a queen that survives the flight and breaches the rival's
+  central hive tile. The breaching side wins immediately.
+- **Online forfeit**: a player leaving mid-match awards the win to the
+  remaining side.
 
-There is no instant-loss mechanic — both hives play out the full round.
+Honey is still the only resource — it just no longer doubles as the score.
 
 ---
 

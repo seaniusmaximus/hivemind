@@ -3,7 +3,7 @@
  * Worker via `env.ROOM.idFromName(code)`. Owns:
  *
  *   - 0–2 connected player WebSockets
- *   - the room phase (lobby → countdown → playing → over)
+ *   - the room phase (lobby → countdown → playing → over → [rematch] → …)
  *   - the authoritative {@link GameLoop} once both players are READY
  *
  * Wire flow on a fresh room code:
@@ -17,6 +17,10 @@
  *   4. From then on `COMMAND`s are forwarded to the loop. The loop pushes
  *      `SNAPSHOT` / `WORD_RESULT` / `COMMAND_RESULT` / `GAME_OVER` back to
  *      players via the {@link GameLoopPort} we hand it.
+ *   5. After `GAME_OVER` we hold the room open in `phase: 'over'` with both
+ *      `ready` flags reset. Either player sending `READY` again opts into a
+ *      rematch; once both have, we tear down the old loop and re-run step 3
+ *      with a fresh seed in the same room.
  *
  * On the last disconnect we tell the LobbyDO to release the code, then let
  * the DO go idle. There's no persistent state worth keeping — a new game
@@ -114,14 +118,34 @@ export class RoomDO extends DurableObject<Env> {
       sendTo: (playerId, msg) => {
         const target = this.players.find((p) => p.id === playerId);
         if (target) sendJson(target.socket, msg);
+        // Detect game-over so we can flip the room into the post-match
+        // rematch lobby without needing the loop to know about room phase.
+        if (msg.type === 'GAME_OVER') this.handleGameOver();
       },
       validateWord: isWord,
     };
   }
 
+  /** Idempotent: the loop emits GAME_OVER once per player; we only act once. */
+  private handleGameOver(): void {
+    if (this.phase === 'over') return;
+    this.phase = 'over';
+    // Reset ready flags so a fresh `READY` from each player is required to
+    // opt into a rematch. The result overlay on each client distinguishes
+    // "they won, I want to rematch" from "I won, opponent wants rematch".
+    for (const p of this.players) p.ready = false;
+    this.sendRoomState();
+  }
+
   private startGame(): void {
     const [host, joiner] = this.players;
     if (!host || !joiner) return;
+
+    // Rematch path: tear down any prior loop before spinning up the new one.
+    if (this.loop) {
+      this.loop.stop();
+      this.loop = null;
+    }
 
     // First-to-join is the host (canonical `'self'` on the server's World);
     // the other is `'opponent'`. `worldToSnapshot` swaps perspective per-player
@@ -203,10 +227,11 @@ export class RoomDO extends DurableObject<Env> {
       case 'READY': {
         const player = this.players.find((p) => p.socket === socket);
         if (!player) return;
+        // Only meaningful in the pre-game lobby or after a game-over (rematch).
+        if (this.phase !== 'lobby' && this.phase !== 'over') return;
         player.ready = true;
         this.sendRoomState();
         if (
-          this.phase === 'lobby' &&
           this.players.length === 2 &&
           this.players.every((p) => p.ready)
         ) {

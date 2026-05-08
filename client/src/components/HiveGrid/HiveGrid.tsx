@@ -6,6 +6,8 @@ import {
   hexEquals,
   hexHpForTile,
   hexKey,
+  isAdjacent,
+  tileHasDraftableLetter,
   type Hex,
   type Side,
   type TileSnapshot,
@@ -117,11 +119,14 @@ export const HiveGrid = ({ side }: Props) => {
   );
 
   const dragModeRef = useRef<DragMode>(null);
+  /** Uncapped comb letter: pointerdown sets anchor; first `pointerenter` elsewhere picks letter-move vs word-draft. */
+  const pendingLetterAnchorRef = useRef<Hex | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   // End any in-progress drag on pointer up anywhere in the document.
   useEffect(() => {
     const up = () => {
+      pendingLetterAnchorRef.current = null;
       if (dragModeRef.current === 'letter-move') {
         commitLetterDrag();
       } else if (dragModeRef.current === 'word-draft') {
@@ -130,6 +135,7 @@ export const HiveGrid = ({ side }: Props) => {
       dragModeRef.current = null;
     };
     const cancel = () => {
+      pendingLetterAnchorRef.current = null;
       if (dragModeRef.current === 'letter-move') cancelLetterDrag();
       else if (dragModeRef.current === 'word-draft') endDraft();
       dragModeRef.current = null;
@@ -244,6 +250,11 @@ export const HiveGrid = ({ side }: Props) => {
     } catch {
       // No active capture — ignore.
     }
+    const uncappedCombLetter =
+      (tile.state === 'active' || tile.state === 'letter') && !!tile.letter;
+    if (!uncappedCombLetter) {
+      pendingLetterAnchorRef.current = null;
+    }
     if (tile.state === 'hive') {
       // Click-the-crown: spawn an attacking queen at the cost of 20 honey.
       if (honeyRef.current < queenCost) {
@@ -262,9 +273,13 @@ export const HiveGrid = ({ side }: Props) => {
       startLetterDrag(h);
       return;
     }
-    if (tile.state === 'letter' || tile.state === 'capped') {
+    if (tile.state === 'capped') {
       dragModeRef.current = 'word-draft';
       startDraft(h);
+      return;
+    }
+    if (uncappedCombLetter) {
+      pendingLetterAnchorRef.current = h;
       return;
     }
     const floating = floatingByHex.get(hexKey(h));
@@ -281,12 +296,37 @@ export const HiveGrid = ({ side }: Props) => {
   const handlePointerEnter = (h: Hex, tile: TileSnapshot) => {
     if (!interactive) return;
     if (dragModeRef.current === 'letter-move') {
-      // Drop target = empty active tile.
-      setDropHover(tile.state === 'active' && !tile.letter ? h : null);
+      const isDropSlot =
+        (tile.state === 'active' && !tile.letter) ||
+        (tile.state === 'storage' && !tile.letter);
+      setDropHover(isDropSlot ? h : null);
       return;
     }
     if (dragModeRef.current === 'word-draft') {
-      if (tile.state === 'letter' || tile.state === 'capped') extendDraft(h);
+      if (tileHasDraftableLetter(tile)) extendDraft(h);
+      return;
+    }
+    const anchor = pendingLetterAnchorRef.current;
+    if (anchor !== null && !hexEquals(anchor, h)) {
+      const tileA = tiles.find((t) => hexEquals(t.hex, anchor));
+      const canLiftFromComb =
+        !!tileA?.letter && (tileA.state === 'active' || tileA.state === 'letter');
+      const isDropSlot =
+        (tile.state === 'active' && !tile.letter) ||
+        (tile.state === 'storage' && !tile.letter);
+      if (canLiftFromComb && isDropSlot) {
+        pendingLetterAnchorRef.current = null;
+        startLetterDrag(anchor);
+        dragModeRef.current = 'letter-move';
+        setDropHover(h);
+        return;
+      }
+      if (canLiftFromComb && tileHasDraftableLetter(tile) && isAdjacent(anchor, h)) {
+        pendingLetterAnchorRef.current = null;
+        startDraft(anchor);
+        extendDraft(h);
+        dragModeRef.current = 'word-draft';
+      }
     }
   };
 
@@ -305,8 +345,8 @@ export const HiveGrid = ({ side }: Props) => {
     cancelWorkerHold(h);
   };
 
-  // While the drag is active, the source storage slot renders without its
-  // letter (it's "in flight" with the pointer-following ghost).
+  // While a letter drag is active, the source hex renders without its letter
+  // (it rides the pointer-following ghost).
   const draggingFromKey = letterDrag ? hexKey(letterDrag.fromHex) : null;
 
   const holdSeconds = (HOLD_DURATION_MS / 1000).toFixed(0);
@@ -347,8 +387,7 @@ export const HiveGrid = ({ side }: Props) => {
           const isDropTarget =
             interactive &&
             !!letterDrag &&
-            t.state === 'active' &&
-            !t.letter;
+            ((t.state === 'active' && !t.letter) || (t.state === 'storage' && !t.letter));
           const isDropHover =
             isDropTarget &&
             dropHover !== null &&
@@ -359,6 +398,7 @@ export const HiveGrid = ({ side }: Props) => {
           const interactiveTile =
             interactive &&
             ((t.state === 'storage' && !!t.letter) ||
+              (t.state === 'active' && !!t.letter) ||
               t.state === 'letter' ||
               t.state === 'capped' ||
               isDropTarget ||
@@ -381,6 +421,7 @@ export const HiveGrid = ({ side }: Props) => {
                 d={hexPath(tileSize)}
                 className="hex-tile"
                 data-state={t.state}
+                data-uncapped-letter={t.state === 'active' && !!t.letter ? true : undefined}
                 data-filled={t.state === 'storage' && !!t.letter}
                 data-draft={drafted}
                 data-draft-idx={draftIdx ?? undefined}

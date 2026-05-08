@@ -9,7 +9,8 @@
     "server"
   ],
   "scripts": {
-    "dev": "npm-run-all --parallel dev:server dev:client",
+    "dev": "npm-run-all --parallel dev:shared dev:server dev:client",
+    "dev:shared": "npm run watch -w shared",
     "dev:client": "npm run dev -w client",
     "dev:server": "npm run dev -w server",
     "build": "npm-run-all build:shared build:client build:server",

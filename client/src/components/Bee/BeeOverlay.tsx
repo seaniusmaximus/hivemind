@@ -9,9 +9,15 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { beeFlight, type Bee } from '@hivemind/shared';
+import {
+  QUEEN_ACTION_INTERVAL_SECONDS,
+  beeFlight,
+  hexEquals,
+  type Bee,
+  type Hex,
+} from '@hivemind/shared';
 import { useGameStore } from '../../state/gameStore.js';
-import { waypointViewport } from '../../game/layout.js';
+import { subscribeRegistry, waypointViewport } from '../../game/layout.js';
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
@@ -24,9 +30,13 @@ const colorFor = (kind: string): string =>
         ? '#fff2c4'
       : 'var(--neon-cyan)';
 
+type QueenHop = { readonly from: Hex; readonly to: Hex; readonly startMs: number };
+
 const beeViewportPos = (
   bee: Bee,
   t: number,
+  queenAssaultHopById: Map<string, QueenHop>,
+  wallMs: number,
 ): { x: number; y: number } | null => {
   const flight = beeFlight(bee.state);
   if (flight) {
@@ -66,7 +76,23 @@ const beeViewportPos = (
     return { x: lerp(a.x, b.x, segT), y: lerp(a.y, b.y, segT) };
   }
   if (bee.state.kind === 'queen-assault') {
-    return waypointViewport(bee.state.panel, bee.state.currentHex);
+    const panel = bee.state.panel;
+    const cur = bee.state.currentHex;
+    let hop = queenAssaultHopById.get(bee.id);
+    if (!hop || !hexEquals(hop.to, cur)) {
+      const from = hop?.to ?? cur;
+      hop = { from, to: cur, startMs: wallMs };
+      queenAssaultHopById.set(bee.id, hop);
+    }
+    const a = waypointViewport(panel, hop.from);
+    const b = waypointViewport(panel, hop.to);
+    if (!a || !b) return null;
+    if (a.x === b.x && a.y === b.y) return a;
+    const u = Math.min(
+      1,
+      Math.max(0, (wallMs - hop.startMs) / (QUEEN_ACTION_INTERVAL_SECONDS * 1000)),
+    );
+    return { x: lerp(a.x, b.x, u), y: lerp(a.y, b.y, u) };
   }
   return null;
 };
@@ -83,6 +109,7 @@ export const BeeOverlay = () => {
   const oppBees = useGameStore((s) => s.world.opponent.bees);
   const [, force] = useState(0);
   const rafRef = useRef(0);
+  const queenAssaultHopRef = useRef(new Map<string, QueenHop>());
 
   // Re-measure on window resize and panel-deck transitions; cheaper than running
   // every animation frame, and the engine tick already triggers re-renders too.
@@ -91,6 +118,8 @@ export const BeeOverlay = () => {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+
+  useEffect(() => subscribeRegistry(() => force((n) => (n + 1) % 1024)), []);
 
   // Smooth re-render between engine ticks so bees don't appear to step.
   useEffect(() => {
@@ -103,11 +132,18 @@ export const BeeOverlay = () => {
   }, []);
 
   const bees: Bee[] = [...selfBees, ...oppBees];
+  const wallMs = performance.now();
+  const hopMap = queenAssaultHopRef.current;
+  for (const id of [...hopMap.keys()]) {
+    if (!bees.some((b) => b.id === id && b.state.kind === 'queen-assault')) {
+      hopMap.delete(id);
+    }
+  }
 
   return (
     <svg className="bee-overlay" aria-hidden>
       {bees.map((bee) => {
-        const pos = beeViewportPos(bee, t);
+        const pos = beeViewportPos(bee, t, queenAssaultHopRef.current, wallMs);
         if (!pos) return null;
         const letter = carryingLetter(bee);
         return (

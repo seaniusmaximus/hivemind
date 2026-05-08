@@ -111,7 +111,7 @@ Tracking against `plans.md` milestones:
   - Your hive trickles in honey at `0.04 / sec × number of owned hex tiles` (~0.76/sec on a fresh hive, faster as you build).
   - Honey is stored up to a cap of `10 + 2 × emptyActiveTileCount`. Empty active tiles are your honeycomb — placing letters or capping words shrinks your headroom; carpenters can grow it back out.
   - Every word you cap pays a **honey bonus** equal to the word's score. Two words on one drone flight that share a tile pay `(w1 + w2) × 1.5`. Bonuses are clamped to your current cap, so timing matters — if you're already maxed out you'll lose the spillover.
-- **Win**: highest honey when the 5-minute timer expires. Tiebreak: largest hive. Otherwise stalemate. There is no instant-loss; both hives play out the round.
+- **Win**: send a queen across the field and breach the rival's central hive tile. There is no time limit and no honey-based victory — the match plays until somebody's queen lands the breach (or a player forfeits in online mode).
 - Your hive starts as the central **hive tile** (gold) plus two rings:
   - 6 **storage slots** (dashed amber) at radius 1 — workers deliver fetched letters here. Holds up to 6 letters.
   - 12 **active tiles** (purple) at radius 2 — empty placement targets and cap headroom.

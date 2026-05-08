@@ -301,13 +301,6 @@ button.ghost {
   gap: 0.2rem;
 }
 
-.hud-clock {
-  font-size: 1.3rem;
-  color: var(--neon-cyan);
-  text-shadow: 0 0 6px var(--neon-cyan);
-  letter-spacing: 0.1em;
-}
-
 .hud-stat {
   display: flex;
   flex-direction: column;
@@ -814,6 +807,10 @@ button.ghost {
   stroke: var(--neon-cyan);
 }
 
+.hex-tile[data-state='active'][data-uncapped-letter='true'] {
+  fill: var(--hex-letter);
+}
+
 .hex-tile[data-state='letter'] {
   fill: var(--hex-letter);
   stroke: var(--neon-cyan);
@@ -1247,6 +1244,32 @@ button.ghost {
   color: var(--text-dim);
 }
 
+.game-over-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  width: 100%;
+  align-items: stretch;
+}
+
+.game-over-rematch {
+  color: var(--honey);
+  border-color: var(--honey);
+  background: rgba(255, 196, 65, 0.1);
+}
+
+.game-over-rematch:hover:not(:disabled),
+.game-over-rematch:focus-visible:not(:disabled) {
+  background: rgba(255, 196, 65, 0.22);
+  box-shadow: 0 0 14px rgba(255, 196, 65, 0.6);
+  outline: none;
+}
+
+.game-over-rematch:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 /* ---- Responsive layout -------------------------------------------------- *
  *
  * Breakpoint at 720px: when the viewport gets narrower than that the
@@ -1308,10 +1331,6 @@ button.ghost {
 
   .hud-stat span:first-child {
     font-size: 0.45rem;
-  }
-
-  .hud-clock {
-    font-size: 1rem;
   }
 
   .activity-feed {
@@ -1510,6 +1529,23 @@ button.ghost {
   font-size: 1rem;
   margin: 0 0 0.4rem;
   text-align: center;
+}
+
+.room-code-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.room-code-heading .hud-title {
+  margin: 0;
+}
+
+.room-code-copy {
+  font-size: 0.55rem;
+  padding: 0.45rem 0.8rem;
+  letter-spacing: 0.12em;
 }
 
 .lobby-field {

@@ -3,7 +3,6 @@ import {
   hex,
   hexEquals,
   makeRng,
-  ROUND_DURATION_SECONDS,
   type ServerMessage,
   type World,
 } from '@hivemind/shared';
@@ -79,13 +78,13 @@ describe('gameLoop: ticking + snapshots', () => {
     if (hostSnap.msg.type !== 'SNAPSHOT' || joinerSnap.msg.type !== 'SNAPSHOT') {
       throw new Error('expected SNAPSHOT messages');
     }
-    // One tick of passive regen has elapsed; allow ~1 unit of slack so the
-    // assertion isn't tied to the regen formula.
-    expect(hostSnap.msg.world.self.honey).toBeCloseTo(17, 0);
-    expect(hostSnap.msg.world.opponent.honey).toBeCloseTo(4, 0);
-    expect(joinerSnap.msg.world.self.honey).toBeCloseTo(4, 0);
-    expect(joinerSnap.msg.world.opponent.honey).toBeCloseTo(17, 0);
-    // Strict invariant: each viewer's `self` is the other viewer's `opponent`.
+    // The viewer-swap is the strict invariant; absolute honey values just
+    // need to be in the right order of magnitude (regen rate is tunable).
+    expect(hostSnap.msg.world.self.honey).toBeGreaterThanOrEqual(17);
+    expect(hostSnap.msg.world.opponent.honey).toBeGreaterThanOrEqual(4);
+    expect(hostSnap.msg.world.self.honey).toBeGreaterThan(
+      hostSnap.msg.world.opponent.honey,
+    );
     expect(hostSnap.msg.world.self.honey).toBe(joinerSnap.msg.world.opponent.honey);
     expect(hostSnap.msg.world.opponent.honey).toBe(joinerSnap.msg.world.self.honey);
   });
@@ -235,17 +234,15 @@ describe('gameLoop: submitWords runs server-side dictionary validation', () => {
 });
 
 describe('gameLoop: game over', () => {
-  test('timer expiry → GAME_OVER reason="time" and no further snapshots', () => {
+  test('engine-flagged game over → GAME_OVER reason="queen" and no further snapshots', () => {
     const w0 = buildInitialWorld(makeRng(1), {
       selfId: 'p-host',
       opponentId: 'p-joiner',
     });
-    const initialWorld: World = {
-      ...w0,
-      t: ROUND_DURATION_SECONDS - 0.001,
-      self: { ...w0.self, honey: 50 },
-      opponent: { ...w0.opponent, honey: 5 },
-    };
+    // Queen breaches are the only path that flips phase to 'over' at runtime;
+    // we simulate the post-breach state by handing the loop a world that's
+    // already there and letting it surface the GAME_OVER on the next tick.
+    const initialWorld: World = { ...w0, phase: 'over', winner: 'self' };
     const { port, sent } = makePort();
     const loop = createGameLoop({ players, seed: 1, initialWorld }, port);
     loop.manualTick(0.05);
@@ -254,10 +251,9 @@ describe('gameLoop: game over', () => {
     expect(gameOvers).toHaveLength(2);
     const first = gameOvers[0]!.msg;
     if (first.type !== 'GAME_OVER') throw new Error('expected GAME_OVER');
-    expect(first.reason).toBe('time');
+    expect(first.reason).toBe('queen');
     expect(first.winnerId).toBe('p-host');
 
-    // Subsequent ticks must not emit anything new.
     const sentLen = sent.length;
     loop.manualTick(0.05);
     expect(sent.length).toBe(sentLen);

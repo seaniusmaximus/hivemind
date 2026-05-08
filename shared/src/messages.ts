@@ -92,7 +92,7 @@ export type ServerMessage =
   | {
       type: 'GAME_OVER';
       winnerId: string | null;
-      reason: 'time' | 'queen' | 'forfeit';
+      reason: 'queen' | 'forfeit';
     }
   | { type: 'ERROR'; code: string; message: string };
 
@@ -190,11 +190,10 @@ export interface TileSnapshot {
    * - `hive`: central hive tile (radius 0). Not playable.
    * - `storage`: one of the six slots adjacent to the hive (radius 1). Holds a
    *   delivered-but-unplaced letter. Empty when `letter === null`.
-   * - `active`: empty playable tile. Initially seeded at radius 2; carpenters
-   *   add new active tiles outward indefinitely. Letters dragged from storage
-   *   land here.
-   * - `letter`: an active tile that holds a placed (locked) letter. Word
-   *   drafts walk these tiles.
+   * - `active`: playable honeycomb tile. May be empty (`letter === null`) or
+   *   hold an uncapped letter until a drone scores it (`capped`).
+   * - `letter`: legacy — placed letter awaiting a cap; treated like `active` +
+   *   a letter for drafting and movement.
    * - `capped`: a letter tile that has been scored by a drone. Still draftable
    *   as a branch point.
    * - `inactive`: legacy state — preserved for back-compat. The renderer now

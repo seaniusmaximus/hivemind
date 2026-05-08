@@ -101,9 +101,10 @@ export const PATCH_LIFETIME_SECONDS = 28;
 /** Two patch centers must be at least this many hexes apart so their petal
  *  rings don't overlap. */
 export const PATCH_MIN_CENTER_DISTANCE = 3;
-export const ROUND_DURATION_SECONDS = 5 * 60;
-export const QUEEN_LIFETIME_SECONDS = 10;
-const QUEEN_ACTION_INTERVAL_SECONDS = 0.45;
+export const QUEEN_ASSAULT_DURATION_SECONDS = 5;
+export const QUEEN_LIFETIME_SECONDS = QUEEN_ASSAULT_DURATION_SECONDS;
+/** Seconds between queen strikes / steps during {@link BeeState} `queen-assault`. */
+export const QUEEN_ACTION_INTERVAL_SECONDS = 0.72;
 const FREED_LETTER_LIFETIME_SECONDS = 6;
 const LOG_MAX_ENTRIES = 14;
 const PATCH_TYPES: readonly FlowerType[] = ['vowel', 'common', 'rare'];
@@ -123,6 +124,16 @@ const cubeDistance = (a: Hex, b: Hex): number => {
   const bz = -b.q - b.r;
   return (Math.abs(a.q - b.q) + Math.abs(a.r - b.r) + Math.abs(az - bz)) / 2;
 };
+
+/** Outermost owned non-hive hex on the defender — queen assault entry point. */
+const pickQueenLandingHex = (defender: PlayerState): Hex | null =>
+  defender.tiles
+    .filter((t) => t.state !== 'hive')
+    .sort((a, b) => {
+      const d = cubeDistance(b.hex, hex(0, 0)) - cubeDistance(a.hex, hex(0, 0));
+      if (d !== 0) return d;
+      return hexKey(a.hex).localeCompare(hexKey(b.hex));
+    })[0]?.hex ?? null;
 
 const buildPlayer = (id: string): PlayerState => {
   const tiles: TileSnapshot[] = [];
@@ -376,7 +387,7 @@ export const tickWorld = (world: World, dt: number, rng: () => number): World =>
   next = tickQueens(next);
   next = tickFreedLetters(next);
   next = tickPatches(next, dt, rng);
-  return checkVictory(next);
+  return next;
 };
 
 /** Solo wrapper: sim + dummy opponent in one call. */
@@ -450,16 +461,20 @@ const tickPatches = (world: World, dt: number, rng: () => number): World => {
   return next;
 };
 
-const checkVictory = (world: World): World => {
-  if (world.t < ROUND_DURATION_SECONDS) return world;
-  // Timer expired. Honey decides; ties broken by hive size.
-  let winner: Side | null = null;
-  if (world.self.honey > world.opponent.honey) winner = 'self';
-  else if (world.opponent.honey > world.self.honey) winner = 'opponent';
-  else if (world.self.tiles.length > world.opponent.tiles.length) winner = 'self';
-  else if (world.opponent.tiles.length > world.self.tiles.length) winner = 'opponent';
-  return { ...world, phase: 'over', winner };
-};
+/**
+ * Honeycomb tiles that can appear in a word path for drone capping (excludes
+ * storage slots, which also carry letters but are not on the comb).
+ */
+export function tileHasDraftableLetter(
+  tile: TileSnapshot | undefined,
+): tile is TileSnapshot & { letter: Letter } {
+  return (
+    !!tile?.letter &&
+    (tile.state === 'capped' ||
+      tile.state === 'letter' ||
+      (tile.state === 'active' && !!tile.letter))
+  );
+}
 
 // ---- Bee resolution --------------------------------------------------------
 
@@ -482,6 +497,37 @@ const resolveSideBees = (world: World, side: Side): World => {
   for (const bee of player.bees) {
     const arrival = arrivalOf(bee);
     if (arrival === null || arrival > world.t) {
+      if (
+        bee.state.kind === 'queen-flying' &&
+        (!Number.isFinite(bee.state.expiresAt) || world.t >= bee.state.expiresAt)
+      ) {
+        beesChanged = true;
+        continue;
+      }
+      if (bee.state.kind === 'queen-flying') {
+        const defender = world[otherSide(side)];
+        const desired = pickQueenLandingHex(defender);
+        if (!desired) {
+          beesChanged = true;
+          continue;
+        }
+        const f = bee.state.flight;
+        const needRetarget =
+          !hexEquals(desired, bee.state.landingHex) || !hexEquals(desired, f.to.hex);
+        const nextState = needRetarget
+          ? {
+              ...bee.state,
+              landingHex: desired,
+              flight: {
+                ...f,
+                to: { panel: bee.state.assaultPanel, hex: desired },
+              },
+            }
+          : bee.state;
+        if (needRetarget) beesChanged = true;
+        remainingBees.push({ ...bee, state: nextState });
+        continue;
+      }
       remainingBees.push(bee);
       continue;
     }
@@ -749,11 +795,7 @@ const resolveSideBees = (world: World, side: Side): World => {
         const cappedHitsThisPath: Hex[] = [];
         for (const h of path) {
           const tile = updatedPlayer.tiles.find((t) => hexEquals(t.hex, h));
-          if (
-            !tile ||
-            (tile.state !== 'letter' && tile.state !== 'capped') ||
-            !tile.letter
-          ) {
+          if (!tile || !tileHasDraftableLetter(tile)) {
             valid = false;
             break;
           }
@@ -915,6 +957,10 @@ const resolveSideBees = (world: World, side: Side): World => {
     }
 
     if (bee.state.kind === 'queen-flying') {
+      if (!Number.isFinite(bee.state.expiresAt) || world.t >= bee.state.expiresAt) {
+        beesChanged = true;
+        continue;
+      }
       // Arrived at the opponent grid — switch to autonomous assault. The first
       // attack lands a short beat after touchdown so the player can register
       // the hand-off visually.
@@ -924,8 +970,8 @@ const resolveSideBees = (world: World, side: Side): World => {
           kind: 'queen-assault',
           panel: bee.state.assaultPanel,
           currentHex: bee.state.landingHex,
-          expiresAt: bee.state.expiresAt,
-          nextActionAt: next.t + 0.25,
+          expiresAt: next.t + QUEEN_ASSAULT_DURATION_SECONDS,
+          nextActionAt: next.t + 0.45,
         },
       });
       next = logEvent(next, {
@@ -954,42 +1000,62 @@ const resolveSideBees = (world: World, side: Side): World => {
 };
 
 /**
- * Pick the next hex the queen should attack from `from`.
+ * Pick a neighbour of `from` that starts a shortest walk to the hive in axial steps.
  *
- * BFS distances are measured *outward from the hive* through owned tiles, so
- * the queen can route correctly whether she is currently sitting on an owned
- * tile or inside a hex she just destroyed. From `from`, we choose the
- * neighbour with the smallest BFS distance — preferring the hive itself when
- * adjacent so the killing blow is taken as soon as possible.
+ * Nodes are hive centre, every defender-owned hex, and any **void** coord (tile
+ * already destroyed). Edges join 6-neighbours; capped so runaway axial void
+ * cannot drain BFS indefinitely.
+ *
+ * Steps along that shortest path minimise travel through defender territory /
+ * corridors the queen clears.
  */
-const firstStepTowardHive = (player: PlayerState, from: Hex): Hex | null => {
+const shortestQueenHopTowardHive = (defender: PlayerState, from: Hex): Hex | null => {
   const goal = hex(0, 0);
-  const ownedTiles = new Map(player.tiles.map((t) => [hexKey(t.hex), t.hex]));
-  if (!ownedTiles.has(hexKey(goal))) return null;
+  const tileByHex = new Map(defender.tiles.map((t) => [hexKey(t.hex), t]));
+  const goalKey = hexKey(goal);
+  if (!tileByHex.has(goalKey)) return null;
+
+  const maxHullRadius = defender.tiles.reduce((m, t) => Math.max(m, cubeDistance(t.hex, goal)), 0);
+  /** Allowed void exploration past the farthest hive ring (narrow carved tunnels). */
+  const maxVoidReach = Math.max(maxHullRadius + 32, 32);
+  /** Hard cap unrelated to hive distance so pathological void chains cannot churn. */
+  const visitBudget = Math.min(60_000, defender.tiles.length * 96 + 2_048);
+
   const dist = new Map<string, number>();
-  dist.set(hexKey(goal), 0);
+  dist.set(goalKey, 0);
   const q: Hex[] = [goal];
-  while (q.length > 0) {
+  let visits = 0;
+
+  while (q.length > 0 && visits < visitBudget) {
+    visits++;
     const cur = q.shift()!;
-    const d = dist.get(hexKey(cur))!;
-    for (const n of neighbors(cur)) {
-      const nk = hexKey(n);
-      if (!ownedTiles.has(nk) || dist.has(nk)) continue;
-      dist.set(nk, d + 1);
-      q.push(n);
+    const dc = dist.get(hexKey(cur))!;
+      const nextDc = dc + 1;
+
+    for (const nbr of neighbors(cur)) {
+      const nk = hexKey(nbr);
+      if (dist.has(nk)) continue;
+      if (cubeDistance(nbr, goal) > maxVoidReach) continue;
+
+      dist.set(nk, nextDc);
+      q.push(nbr);
     }
   }
+
+  if (!dist.has(hexKey(from))) return null;
+
   let best: Hex | null = null;
-  let bestDist = Infinity;
-  for (const n of neighbors(from)) {
-    const nk = hexKey(n);
+  let bestD = Infinity;
+  for (const nbr of neighbors(from)) {
+    const nk = hexKey(nbr);
     const d = dist.get(nk);
     if (d === undefined) continue;
-    if (d < bestDist) {
-      bestDist = d;
-      best = ownedTiles.get(nk) ?? n;
+    if (best === null || d < bestD || (d === bestD && nk.localeCompare(hexKey(best)) < 0)) {
+      bestD = d;
+      best = nbr;
     }
   }
+
   return best;
 };
 
@@ -1027,12 +1093,48 @@ const tickQueens = (world: World): World => {
         continue;
       }
       dirty = true;
-      if (next.t >= bee.state.expiresAt) continue;
+      if (!Number.isFinite(bee.state.expiresAt) || next.t >= bee.state.expiresAt) continue;
       if (next.t < bee.state.nextActionAt) {
         bees.push(bee);
         continue;
       }
-      const step = firstStepTowardHive(defender, bee.state.currentHex);
+      const ch = bee.state.currentHex;
+      const tileHere = defender.tiles.find((t) => hexEquals(t.hex, ch));
+      if (tileHere?.state === 'hive') {
+        next = logEvent(next, {
+          t: next.t,
+          ownerId: attacker.id,
+          text: `queen breached hive!`,
+        });
+        return { ...next, phase: 'over', winner: side };
+      }
+      // Clear the hex the queen occupies before stepping inward (no tunneling
+      // past intact tiles).
+      if (tileHere) {
+        const nextDamage = (tileHere.damage ?? 0) + 1;
+        if (nextDamage >= hexHpForTile(tileHere)) {
+          defender = destroyTile(defender, ch, next.t);
+          next = logEvent(next, {
+            t: next.t,
+            ownerId: attacker.id,
+            text: `queen smashed ${tileHere.letter ?? 'tile'}`,
+          });
+        } else {
+          defender = {
+            ...defender,
+            tiles: defender.tiles.map((t) =>
+              hexEquals(t.hex, ch) ? { ...t, damage: nextDamage } : t,
+            ),
+          };
+        }
+        bees.push({
+          ...bee,
+          state: { ...bee.state, nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS },
+        });
+        continue;
+      }
+
+      const step = shortestQueenHopTowardHive(defender, ch);
       if (!step) {
         bees.push({
           ...bee,
@@ -1181,11 +1283,7 @@ export const dispatchQueen = (world: World, side: Side): CommandResult => {
   );
   if (alreadyPresent) return { ok: false, world, reason: 'queen already active' };
   const enemy = world[otherSide(side)];
-  // Land on the opponent's outermost (highest cube-distance) non-hive tile so
-  // the assault has the most travel through their grid.
-  const landing = enemy.tiles
-    .filter((t) => t.state !== 'hive')
-    .sort((a, b) => cubeDistance(b.hex, hex(0, 0)) - cubeDistance(a.hex, hex(0, 0)))[0]?.hex;
+  const landing = pickQueenLandingHex(enemy);
   if (!landing) return { ok: false, world, reason: 'enemy hive unavailable' };
   const ownerPanel = sideHivePanel(side);
   const enemyPanel = sideHivePanel(otherSide(side));
@@ -1198,7 +1296,7 @@ export const dispatchQueen = (world: World, side: Side): CommandResult => {
       kind: 'queen-flying',
       assaultPanel: enemyPanel,
       landingHex: landing,
-      expiresAt: world.t + FLIGHT_TIMES.queenToHive + QUEEN_LIFETIME_SECONDS,
+      expiresAt: world.t + FLIGHT_TIMES.queenToHive + QUEEN_ASSAULT_DURATION_SECONDS,
       flight: flight(
         ownerPanel,
         hex(0, 0),
@@ -1218,8 +1316,9 @@ export const dispatchQueen = (world: World, side: Side): CommandResult => {
 };
 
 /**
- * Move a letter from a storage slot onto an empty active tile. The letter
- * locks once placed — its only future is to be capped by a drone.
+ * Move a letter between storage and the honeycomb, or reposition an uncapped
+ * letter between empty honeycomb / storage slots. Capped tiles cannot be a
+ * source. Letters stay on `active` until a drone scores them (`capped`).
  */
 export const placeLetter = (
   world: World,
@@ -1227,21 +1326,44 @@ export const placeLetter = (
   fromHex: Hex,
   toHex: Hex,
 ): CommandResult => {
+  if (hexEquals(fromHex, toHex)) {
+    return { ok: false, world, reason: 'source and destination are the same' };
+  }
   const player = world[side];
   const source = player.tiles.find((t) => hexEquals(t.hex, fromHex));
-  if (!source || source.state !== 'storage' || !source.letter) {
-    return { ok: false, world, reason: 'no letter in that storage slot' };
-  }
   const dest = player.tiles.find((t) => hexEquals(t.hex, toHex));
-  if (!dest || dest.state !== 'active' || dest.letter) {
-    return { ok: false, world, reason: 'destination is not an empty active tile' };
+  if (!source?.letter) {
+    return { ok: false, world, reason: 'no letter at source' };
+  }
+  if (source.state === 'capped') {
+    return { ok: false, world, reason: 'capped letters cannot be moved' };
+  }
+  const fromStorage = source.state === 'storage';
+  const fromGrid =
+    (source.state === 'active' && source.letter) ||
+    (source.state === 'letter' && source.letter);
+  if (!fromStorage && !fromGrid) {
+    return { ok: false, world, reason: 'invalid source for letter move' };
+  }
+  if (!dest || dest.letter) {
+    return { ok: false, world, reason: 'destination already holds a letter' };
+  }
+  if (dest.state !== 'active' && dest.state !== 'storage') {
+    return { ok: false, world, reason: 'destination is not a letter slot' };
   }
   const letter = source.letter;
   const updated: PlayerState = {
     ...player,
     tiles: player.tiles.map((t) => {
-      if (hexEquals(t.hex, fromHex)) return { ...t, letter: null };
-      if (hexEquals(t.hex, toHex)) return { ...t, state: 'letter', letter };
+      if (hexEquals(t.hex, fromHex)) {
+        if (fromStorage) return { ...t, letter: null };
+        return { ...t, state: 'active' as const, letter: null };
+      }
+      if (hexEquals(t.hex, toHex)) {
+        return dest.state === 'storage'
+          ? { ...t, letter }
+          : { ...t, state: 'active' as const, letter };
+      }
       return t;
     }),
   };
@@ -1250,9 +1372,9 @@ export const placeLetter = (
 
 /**
  * Submit one or more drafted word paths for capping. Each path must be at
- * least 2 tiles, contiguous, and pass only over `letter` or `capped` tiles
- * (capped tiles are the branch points of the Scrabble model). A prior
- * word+hex-letter combination cannot be submitted again.
+ * least 2 tiles, contiguous, and pass only over uncapped honeycomb letters,
+ * `letter` legacy tiles, or `capped` branch tiles. A prior word+hex-letter
+ * combination cannot be submitted again.
  */
 export const trySubmitWord = (
   world: World,
@@ -1272,11 +1394,7 @@ export const trySubmitWord = (
     const placements: string[] = [];
     for (const h of path) {
       const tile = player.tiles.find((t) => hexEquals(t.hex, h));
-      if (
-        !tile ||
-        (tile.state !== 'letter' && tile.state !== 'capped') ||
-        !tile.letter
-      ) {
+      if (!tile || !tileHasDraftableLetter(tile)) {
         return { ok: false, world, reason: 'path includes a non-letter tile' };
       }
       letters.push(tile.letter);

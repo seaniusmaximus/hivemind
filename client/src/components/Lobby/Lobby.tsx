@@ -79,6 +79,56 @@ const ChooseRoom = () => {
   );
 };
 
+const RoomCodeHeading = ({ code }: { code: string }) => {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    if (!code) return;
+    const fallback = () => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = code;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      } catch {
+        // last-ditch silent failure — the code is still readable on screen.
+      }
+    };
+    const onSuccess = () => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(code).then(onSuccess, () => {
+        fallback();
+        onSuccess();
+      });
+    } else {
+      fallback();
+      onSuccess();
+    }
+  };
+
+  return (
+    <div className="room-code-heading">
+      <h2 className="hud-title">ROOM {code}</h2>
+      <button
+        type="button"
+        className="lobby-button lobby-button-ghost room-code-copy"
+        onClick={handleCopy}
+        aria-label="Copy room code to clipboard"
+        disabled={!code}
+      >
+        {copied ? 'COPIED!' : 'COPY CODE'}
+      </button>
+    </div>
+  );
+};
+
 const WaitingRoom = () => {
   const room = useGameStore((s) => s.room)!;
   const sendReady = useGameStore((s) => s.sendReady);
@@ -90,7 +140,7 @@ const WaitingRoom = () => {
   // server will echo back a ROOM_STATE that confirms.
   return (
     <div className="lobby-card">
-      <h2 className="hud-title">ROOM {room.code}</h2>
+      <RoomCodeHeading code={room.code} />
       <div className="lobby-roster">
         {[0, 1].map((i) => {
           const p = room.players[i];

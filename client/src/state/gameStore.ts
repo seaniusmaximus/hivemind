@@ -8,6 +8,7 @@ import {
   makeRng,
   tickSolo,
   tickWorld,
+  tileHasDraftableLetter,
   type BeePanel,
   type CommandResult,
   type GameCommand,
@@ -81,7 +82,7 @@ export interface RoomState {
   readonly opponentId: string | null;
   /** Filled when the server emits `GAME_OVER`. The renderer surfaces this
    *  as a result overlay; the user clicks through to leave the room. */
-  readonly result: { readonly winnerId: string | null; readonly reason: 'time' | 'queen' | 'forfeit' } | null;
+  readonly result: { readonly winnerId: string | null; readonly reason: 'queen' | 'forfeit' } | null;
 }
 
 export interface NetState {
@@ -106,9 +107,9 @@ interface GameStore {
    * currently being extended by the active drag (if any).
    */
   wordDrafts: readonly (readonly Hex[])[];
-  /** Set while the user is drag-moving a letter from a storage slot. */
+  /** Set while the user is drag-moving a letter between storage and comb tiles. */
   letterDrag: LetterDrag | null;
-  /** The active tile currently hovered as a drop target during letter drag. */
+  /** Hex (active or empty storage) currently hovered as a drop target during letter drag. */
   dropHover: Hex | null;
   /** Async submit in progress (awaiting dictionary). */
   submitting: boolean;
@@ -140,7 +141,7 @@ interface GameStore {
    *  engine-action wrappers below to surface failures where the user clicked. */
   pushToast: (toast: { text: string; panel: BeePanel; hex: Hex; variant?: Toast['variant'] }) => void;
 
-  // Letter movement: storage → active.
+  /** Letter movement: storage ↔ honeycomb, or reposition uncapped letters. */
   startLetterDrag: (fromHex: Hex) => void;
   setDropHover: (h: Hex | null) => void;
   commitLetterDrag: () => void;
@@ -207,9 +208,6 @@ const snapshotToWorld = (snap: WorldSnapshot): World => ({
 
 const tileAt = (world: World, side: Side, h: Hex): TileSnapshot | undefined =>
   world[side].tiles.find((t) => hexEquals(t.hex, h));
-
-const isLetterOrCapped = (tile: TileSnapshot | undefined): boolean =>
-  !!tile && (tile.state === 'letter' || tile.state === 'capped') && !!tile.letter;
 
 const draftToWord = (world: World, side: Side, path: readonly Hex[]): string =>
   path
@@ -321,7 +319,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
   startLetterDrag: (fromHex) => {
     set((s) => {
       const tile = tileAt(s.world, 'self', fromHex);
-      if (!tile || tile.state !== 'storage' || !tile.letter) return s;
+      if (!tile?.letter) return s;
+      if (tile.state === 'capped') return s;
+      if (tile.state !== 'storage' && tile.state !== 'active' && tile.state !== 'letter') {
+        return s;
+      }
       return {
         letterDrag: { fromHex, letter: tile.letter },
         dropHover: null,
@@ -335,7 +337,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
       if (!s.letterDrag) return s;
       if (h === null) return { dropHover: null };
       const tile = tileAt(s.world, 'self', h);
-      if (!tile || tile.state !== 'active' || tile.letter) return { dropHover: null };
+      const okSlot =
+        !!tile &&
+        !tile.letter &&
+        (tile.state === 'active' || tile.state === 'storage');
+      if (!okSlot) return { dropHover: null };
       return { dropHover: h };
     });
   },
@@ -366,7 +372,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   startDraft: (h) => {
     const s = get();
     const tile = tileAt(s.world, 'self', h);
-    if (!isLetterOrCapped(tile)) return;
+    if (!tileHasDraftableLetter(tile)) return;
     set({
       wordDrafts: [...s.wordDrafts, [h]],
       letterDrag: null,
@@ -394,7 +400,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       if (cur.some((d) => hexEquals(d, h))) return s;
       if (!isAdjacent(last, h)) return s;
       const tile = tileAt(s.world, 'self', h);
-      if (!isLetterOrCapped(tile)) return s;
+      if (!tileHasDraftableLetter(tile)) return s;
       return {
         wordDrafts: drafts.slice(0, idx).concat([[...cur, h]]),
       };

@@ -16,7 +16,8 @@ export const BEE_STATS: Readonly<Record<BeeKind, BeeStats>> = {
   // gesture spawns one bee that visits exactly one target and returns.
   worker: { capacity: 1, honeyCost: 3, flightSeconds: 1.5 },
   carpenter: { capacity: 1, honeyCost: 5, flightSeconds: 1.2 },
-  drone: { capacity: 2, honeyCost: 7, flightSeconds: 1.6 },
+  // Drone caps are free — words pay you, they never charge you.
+  drone: { capacity: 2, honeyCost: 0, flightSeconds: 1.6 },
   queen: { capacity: 1, honeyCost: 20, flightSeconds: 10 },
 };
 
@@ -57,7 +58,7 @@ export const FLIGHT_TIMES = {
   tileToHive: 0.7,
   /** Drone time to walk a single word path. Total cap time scales with path count. */
   cappingPerPath: 1.4,
-  queenToHive: 1.2,
+  queenToHive: 10,
 } as const;
 
 /** Identifies which on-screen panel a bee waypoint lives in. */
