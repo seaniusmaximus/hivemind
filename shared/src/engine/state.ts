@@ -30,6 +30,7 @@
 import {
   BEE_STATS,
   FLIGHT_TIMES,
+  HEXES_PER_QUEEN_SLOT,
   HIVE,
   type Bee,
   type BeeFlight,
@@ -155,9 +156,34 @@ const buildPlayer = (id: string): PlayerState => {
   };
 };
 
-/** Per-second honey regeneration: scales linearly with hive size. */
-export const honeyRateFor = (player: PlayerState): number =>
-  HIVE.regenPerHex * player.tiles.length;
+/**
+ * Per-second honey regeneration. Every owned hex contributes
+ * {@link HIVE.regenPerHex}; each capped letter adds an additional
+ * {@link HIVE.cappedHoneyBonus} on top so locking in words pays back as
+ * sustained production, not just one-shot word bonuses.
+ */
+export const honeyRateFor = (player: PlayerState): number => {
+  let cappedCount = 0;
+  for (const t of player.tiles) if (t.state === 'capped') cappedCount += 1;
+  return HIVE.regenPerHex * player.tiles.length + HIVE.cappedHoneyBonus * cappedCount;
+};
+
+/**
+ * How many queens a player may have simultaneously airborne or assaulting.
+ * One by default, plus one extra per full {@link HEXES_PER_QUEEN_SLOT} owned
+ * hexes — bigger hives get to field swarms.
+ */
+export const queenAllowanceFor = (player: PlayerState): number =>
+  1 + Math.floor(player.tiles.length / HEXES_PER_QUEEN_SLOT);
+
+/** Count the player's queens currently in flight or mid-assault. */
+export const activeQueenCountFor = (player: PlayerState): number => {
+  let n = 0;
+  for (const b of player.bees) {
+    if (b.state.kind === 'queen-flying' || b.state.kind === 'queen-assault') n += 1;
+  }
+  return n;
+};
 
 /**
  * Honey storage cap: the central hive contributes {@link HIVE.hiveStorage}
@@ -1299,17 +1325,17 @@ export const dispatchWorker = (world: World, side: Side, target: Hex): CommandRe
 /**
  * Spawn a queen that flies from the player's hive across to the opponent's
  * outer ring, then autonomously chews her way inward toward the central hive
- * tile. Costs {@link BEE_STATS.queen.honeyCost}; only one queen can be alive
- * at a time per side.
+ * tile. Costs {@link BEE_STATS.queen.honeyCost}; the number of queens a side
+ * may have airborne at once is given by {@link queenAllowanceFor} (one plus
+ * one for every {@link HEXES_PER_QUEEN_SLOT} owned hexes).
  */
 export const dispatchQueen = (world: World, side: Side): CommandResult => {
   const player = world[side];
   const cost = BEE_STATS.queen.honeyCost;
   if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
-  const alreadyPresent = player.bees.some(
-    (b) => b.state.kind === 'queen-flying' || b.state.kind === 'queen-assault',
-  );
-  if (alreadyPresent) return { ok: false, world, reason: 'queen already active' };
+  if (activeQueenCountFor(player) >= queenAllowanceFor(player)) {
+    return { ok: false, world, reason: 'queen allowance reached' };
+  }
   const enemy = world[otherSide(side)];
   const landing = pickQueenLandingHex(enemy);
   if (!landing) return { ok: false, world, reason: 'enemy hive unavailable' };

@@ -194,9 +194,12 @@ var HIVE = {
   startingHoney: 5,
   /** Honey regenerated per second, per owned hex tile. */
   regenPerHex: 0.04,
+  /** Extra honey/sec each capped letter contributes on top of `regenPerHex`. */
+  cappedHoneyBonus: 0.08,
   /** Capacity contributed by the central hive tile itself. */
   hiveStorage: 5
 };
+var HEXES_PER_QUEEN_SLOT = 12;
 var FLIGHT_TIMES = {
   hiveToFlower: 1.5,
   flowerToHive: 1.5,
@@ -288,7 +291,22 @@ var buildPlayer = /* @__PURE__ */ __name((id) => {
     usedWordSignatures: []
   };
 }, "buildPlayer");
-var honeyRateFor = /* @__PURE__ */ __name((player) => HIVE.regenPerHex * player.tiles.length, "honeyRateFor");
+var honeyRateFor = /* @__PURE__ */ __name((player) => {
+  let cappedCount = 0;
+  for (const t of player.tiles)
+    if (t.state === "capped")
+      cappedCount += 1;
+  return HIVE.regenPerHex * player.tiles.length + HIVE.cappedHoneyBonus * cappedCount;
+}, "honeyRateFor");
+var queenAllowanceFor = /* @__PURE__ */ __name((player) => 1 + Math.floor(player.tiles.length / HEXES_PER_QUEEN_SLOT), "queenAllowanceFor");
+var activeQueenCountFor = /* @__PURE__ */ __name((player) => {
+  let n = 0;
+  for (const b of player.bees) {
+    if (b.state.kind === "queen-flying" || b.state.kind === "queen-assault")
+      n += 1;
+  }
+  return n;
+}, "activeQueenCountFor");
 var honeyCapFor = /* @__PURE__ */ __name((player) => {
   let cap = 0;
   for (const t of player.tiles) {
@@ -1095,9 +1113,9 @@ var dispatchQueen = /* @__PURE__ */ __name((world, side) => {
   const cost = BEE_STATS.queen.honeyCost;
   if (player.honey < cost)
     return { ok: false, world, reason: "not enough honey" };
-  const alreadyPresent = player.bees.some((b) => b.state.kind === "queen-flying" || b.state.kind === "queen-assault");
-  if (alreadyPresent)
-    return { ok: false, world, reason: "queen already active" };
+  if (activeQueenCountFor(player) >= queenAllowanceFor(player)) {
+    return { ok: false, world, reason: "queen allowance reached" };
+  }
   const enemy = world[otherSide(side)];
   const landing = pickQueenLandingHex(enemy);
   if (!landing)

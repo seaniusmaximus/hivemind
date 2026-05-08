@@ -1,17 +1,20 @@
 import { hex, hexEquals } from '../hex.js';
-import { HIVE } from '../bees.js';
+import { BEE_STATS, HEXES_PER_QUEEN_SLOT, HIVE } from '../bees.js';
 import { makeRng } from '../letters.js';
 import type { Petal } from '../messages.js';
 import {
+  activeQueenCountFor,
   applyCommand,
   buildInitialWorld,
   dispatchCarpenter,
+  dispatchQueen,
   dispatchWorker,
   frontierFor,
   honeyCapFor,
   honeyRateFor,
   petalAt,
   placeLetter,
+  queenAllowanceFor,
   trySubmitWord,
   tickWorld,
   worldToSnapshot,
@@ -58,11 +61,29 @@ describe('engine: world construction', () => {
 });
 
 describe('engine: honey economy', () => {
-  test('regen rate scales linearly with owned hex count', () => {
+  test('regen rate scales linearly with owned hex count (no capped letters)', () => {
     const w = buildInitialWorld(fixedRng());
     const expected = HIVE.regenPerHex * w.self.tiles.length;
     expect(honeyRateFor(w.self)).toBeCloseTo(expected);
     expect(honeyRateFor(w.opponent)).toBeCloseTo(expected);
+  });
+
+  test('each capped letter adds HIVE.cappedHoneyBonus to the regen rate', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const baseRate = honeyRateFor(w0.self);
+    const actives = w0.self.tiles.filter((t) => t.state === 'active').slice(0, 3);
+    const w1: World = {
+      ...w0,
+      self: {
+        ...w0.self,
+        tiles: w0.self.tiles.map((t) =>
+          actives.some((a) => hexEquals(a.hex, t.hex))
+            ? { ...t, state: 'capped' as const, letter: 'A' as const }
+            : t,
+        ),
+      },
+    };
+    expect(honeyRateFor(w1.self)).toBeCloseTo(baseRate + 3 * HIVE.cappedHoneyBonus);
   });
 
   test('cap formula = hiveStorage + count(non-storage non-hive tiles)', () => {
@@ -111,6 +132,56 @@ describe('engine: honey economy', () => {
     w = { ...w, self: { ...w.self, honey: cap } };
     const after = advance(w, 2.0, rng);
     expect(after.self.honey).toBeLessThanOrEqual(honeyCapFor(after.self) + 1e-6);
+  });
+});
+
+describe('engine: queen allowance scales with hive size', () => {
+  test('allowance is 1 + floor(tiles.length / HEXES_PER_QUEEN_SLOT)', () => {
+    const w = buildInitialWorld(fixedRng());
+    expect(queenAllowanceFor(w.self)).toBe(
+      1 + Math.floor(w.self.tiles.length / HEXES_PER_QUEEN_SLOT),
+    );
+    // Stub a player at a specific tile count (formula depends only on length).
+    const sample = w.self.tiles[0]!;
+    const tilesOfSize = (n: number) =>
+      Array.from({ length: n }, () => sample);
+    const playerWith = (n: number) => ({ ...w.self, tiles: tilesOfSize(n) });
+    expect(queenAllowanceFor(playerWith(0))).toBe(1);
+    expect(queenAllowanceFor(playerWith(11))).toBe(1);
+    expect(queenAllowanceFor(playerWith(12))).toBe(2);
+    expect(queenAllowanceFor(playerWith(23))).toBe(2);
+    expect(queenAllowanceFor(playerWith(24))).toBe(3);
+    expect(queenAllowanceFor(playerWith(36))).toBe(4);
+  });
+
+  test('dispatchQueen succeeds repeatedly until the allowance is reached', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    // Big stockpile + tile pool that generates a 3-queen allowance.
+    const allowance = queenAllowanceFor(w.self);
+    expect(allowance).toBeGreaterThanOrEqual(2);
+    w = {
+      ...w,
+      self: { ...w.self, honey: BEE_STATS.queen.honeyCost * (allowance + 2) },
+    };
+    let cumulative = w;
+    for (let i = 0; i < allowance; i++) {
+      const r = dispatchQueen(cumulative, 'self');
+      expect(r.ok).toBe(true);
+      cumulative = r.world;
+    }
+    expect(activeQueenCountFor(cumulative.self)).toBe(allowance);
+    const blocked = dispatchQueen(cumulative, 'self');
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.reason).toBe('queen allowance reached');
+  });
+
+  test('honey shortage rejects before the allowance check', () => {
+    const w = buildInitialWorld(fixedRng());
+    const broke: World = { ...w, self: { ...w.self, honey: 0 } };
+    const r = dispatchQueen(broke, 'self');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('not enough honey');
   });
 });
 

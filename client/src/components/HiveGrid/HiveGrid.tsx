@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
+  activeQueenCountFor,
   axialToPixel,
   BEE_STATS,
   frontierFor,
@@ -7,6 +8,7 @@ import {
   hexHpForTile,
   hexKey,
   isAdjacent,
+  queenAllowanceFor,
   tileHasDraftableLetter,
   type Hex,
   type Side,
@@ -69,7 +71,6 @@ export const HiveGrid = ({ side }: Props) => {
   const dispatchQueen = useGameStore((s) => s.dispatchQueen);
   const pushToast = useGameStore((s) => s.pushToast);
   const honey = useGameStore((s) => s.world.self.honey);
-  const selfBees = useGameStore((s) => s.world.self.bees);
 
   const carpenterCost = BEE_STATS.carpenter.honeyCost;
   const workerCost = BEE_STATS.worker.honeyCost;
@@ -169,6 +170,7 @@ export const HiveGrid = ({ side }: Props) => {
         state: 'inactive' as const,
         letter: null,
         reuseCount: 0,
+        damage: 0,
         pixel: axialToPixel(h, HEX_SIZE),
         isFrontier: true,
       }));
@@ -204,11 +206,13 @@ export const HiveGrid = ({ side }: Props) => {
     return set;
   }, [player.bees]);
   const claimOwner = side === 'self' ? 'self' : 'opp';
-  const queenInPlay = (side === 'self' ? selfBees : player.bees).some(
-    (b) => b.state.kind === 'queen-flying' || b.state.kind === 'queen-assault',
-  );
+  // `player === world[side]` so this checks the right side either way; the
+  // central-hive click only fires for `side === 'self'` below.
+  const queensActive = activeQueenCountFor(player);
+  const queenAllowance = queenAllowanceFor(player);
+  const queensFull = queensActive >= queenAllowance;
   const canSpawnQueen =
-    side === 'self' && honey >= queenCost && !queenInPlay;
+    side === 'self' && honey >= queenCost && !queensFull;
   const floatingByHex = useMemo(
     () => new Map(floatingLetters.map((f) => [hexKey(f.hex), f])),
     [floatingLetters],
@@ -261,8 +265,13 @@ export const HiveGrid = ({ side }: Props) => {
         pushToast({ text: 'not enough honey', panel: 'self-hive', hex: h, variant: 'error' });
         return;
       }
-      if (queenInPlay) {
-        pushToast({ text: 'queen already active', panel: 'self-hive', hex: h, variant: 'error' });
+      if (queensFull) {
+        pushToast({
+          text: `queen allowance full (${queensActive}/${queenAllowance})`,
+          panel: 'self-hive',
+          hex: h,
+          variant: 'error',
+        });
         return;
       }
       dispatchQueen('self');
@@ -393,8 +402,12 @@ export const HiveGrid = ({ side }: Props) => {
             dropHover !== null &&
             hexEquals(dropHover, t.hex);
           const hideLetter = draggingFromKey === k;
-          const reuseLevel = t.reuseCount ?? 0;
+          const reuseCount = t.reuseCount ?? 0;
           const hp = hexHpForTile(t);
+          // Each capped reuse adds +2 HP and one ring. As the queen damages a
+          // tile we peel rings off so the visible borders mirror the tile's
+          // remaining HP tier (every 2 damage = one ring lost).
+          const reuseLevel = Math.max(0, reuseCount - Math.floor((t.damage ?? 0) / 2));
           const interactiveTile =
             interactive &&
             ((t.state === 'storage' && !!t.letter) ||

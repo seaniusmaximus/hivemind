@@ -30,7 +30,10 @@ export const BEE_STATS: Readonly<Record<BeeKind, BeeStats>> = {
  * honey on top.
  *
  * - `regenPerHex` is multiplied by the total number of owned hex tiles
- *   (hive + storage + active + letter + capped) to get your per-second rate.
+ *   (hive + storage + active + letter + capped) to get your per-second base
+ *   rate.
+ * - `cappedHoneyBonus` is added on top once per capped letter the player owns,
+ *   so locking in words materially boosts your sustained production.
  * - The honey cap is the sum of:
  *   - {@link HIVE.hiveStorage} for the central hive tile, and
  *   - 1 for every owned tile that is *not* the central hive and *not* a
@@ -43,9 +46,18 @@ export const HIVE = {
   startingHoney: 5,
   /** Honey regenerated per second, per owned hex tile. */
   regenPerHex: 0.04,
+  /** Extra honey/sec each capped letter contributes on top of `regenPerHex`. */
+  cappedHoneyBonus: 0.08,
   /** Capacity contributed by the central hive tile itself. */
   hiveStorage: 5,
 } as const;
+
+/**
+ * Owned hexes required per additional queen slot. A player can have one queen
+ * active at a time by default, plus one extra for every full multiple of
+ * {@link HEXES_PER_QUEEN_SLOT} hexes they own. Big hives field swarms.
+ */
+export const HEXES_PER_QUEEN_SLOT = 12;
 
 /** Per-segment flight times (seconds). */
 export const FLIGHT_TIMES = {
