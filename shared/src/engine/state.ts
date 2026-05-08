@@ -105,6 +105,8 @@ export const QUEEN_ASSAULT_DURATION_SECONDS = 5;
 export const QUEEN_LIFETIME_SECONDS = QUEEN_ASSAULT_DURATION_SECONDS;
 /** Seconds between queen strikes / steps during {@link BeeState} `queen-assault`. */
 export const QUEEN_ACTION_INTERVAL_SECONDS = 0.72;
+/** Damage dealt to a hex per queen strike (during {@link BeeState} `queen-assault`). */
+export const QUEEN_DAMAGE_PER_STRIKE = 2;
 const FREED_LETTER_LIFETIME_SECONDS = 6;
 const LOG_MAX_ENTRIES = 14;
 const PATCH_TYPES: readonly FlowerType[] = ['vowel', 'common', 'rare'];
@@ -1111,7 +1113,7 @@ const tickQueens = (world: World): World => {
       // Clear the hex the queen occupies before stepping inward (no tunneling
       // past intact tiles).
       if (tileHere) {
-        const nextDamage = (tileHere.damage ?? 0) + 1;
+        const nextDamage = (tileHere.damage ?? 0) + QUEEN_DAMAGE_PER_STRIKE;
         if (nextDamage >= hexHpForTile(tileHere)) {
           defender = destroyTile(defender, ch, next.t);
           next = logEvent(next, {
@@ -1162,7 +1164,7 @@ const tickQueens = (world: World): World => {
         });
         return { ...next, phase: 'over', winner: side };
       }
-      const nextDamage = (targetTile.damage ?? 0) + 1;
+      const nextDamage = (targetTile.damage ?? 0) + QUEEN_DAMAGE_PER_STRIKE;
       if (nextDamage >= hexHpForTile(targetTile)) {
         defender = destroyTile(defender, step, next.t);
         next = logEvent(next, {

@@ -248,6 +248,7 @@ var PATCH_LIFETIME_SECONDS = 28;
 var PATCH_MIN_CENTER_DISTANCE = 3;
 var QUEEN_ASSAULT_DURATION_SECONDS = 5;
 var QUEEN_ACTION_INTERVAL_SECONDS = 0.72;
+var QUEEN_DAMAGE_PER_STRIKE = 2;
 var FREED_LETTER_LIFETIME_SECONDS = 6;
 var LOG_MAX_ENTRIES = 14;
 var PATCH_TYPES = ["vowel", "common", "rare"];
@@ -951,7 +952,7 @@ var tickQueens = /* @__PURE__ */ __name((world) => {
         return { ...next, phase: "over", winner: side };
       }
       if (tileHere) {
-        const nextDamage2 = (tileHere.damage ?? 0) + 1;
+        const nextDamage2 = (tileHere.damage ?? 0) + QUEEN_DAMAGE_PER_STRIKE;
         if (nextDamage2 >= hexHpForTile(tileHere)) {
           defender = destroyTile(defender, ch, next.t);
           next = logEvent(next, {
@@ -999,7 +1000,7 @@ var tickQueens = /* @__PURE__ */ __name((world) => {
         });
         return { ...next, phase: "over", winner: side };
       }
-      const nextDamage = (targetTile.damage ?? 0) + 1;
+      const nextDamage = (targetTile.damage ?? 0) + QUEEN_DAMAGE_PER_STRIKE;
       if (nextDamage >= hexHpForTile(targetTile)) {
         defender = destroyTile(defender, step, next.t);
         next = logEvent(next, {
