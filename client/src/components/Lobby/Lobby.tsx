@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { playLobbyUi } from '../../game/audio/sfx.js';
 import { useGameStore } from '../../state/gameStore.js';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -51,7 +52,10 @@ const ChooseRoom = () => {
         <button
           type="button"
           className="lobby-button"
-          onClick={() => createRoom(name.trim() || 'host')}
+          onClick={() => {
+            playLobbyUi();
+            void createRoom(name.trim() || 'host');
+          }}
           disabled={!ready}
         >
           CREATE ROOM
@@ -69,7 +73,10 @@ const ChooseRoom = () => {
         <button
           type="button"
           className="lobby-button"
-          onClick={() => joinRoom(code.trim().toUpperCase(), name.trim() || 'guest')}
+          onClick={() => {
+            playLobbyUi();
+            joinRoom(code.trim().toUpperCase(), name.trim() || 'guest');
+          }}
           disabled={!ready || code.trim().length !== 6}
         >
           JOIN ROOM

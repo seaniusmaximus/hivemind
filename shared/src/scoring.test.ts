@@ -1,4 +1,4 @@
-import { wordScore, chainScore, lengthMultiplier } from './scoring.js';
+import { honeyForCappedWord, wordScore, lengthMultiplier } from './scoring.js';
 import type { Letter } from './letters.js';
 
 const word = (s: string): Letter[] => [...s] as Letter[];
@@ -19,9 +19,9 @@ describe('scoring', () => {
     expect(wordScore(word('QUARTZ'))).toBe(36);
   });
 
-  test('chain of two words gets 1.5x', () => {
+  test('honeyForCappedWord applies 1.5× when path crossed a prior-capped letter', () => {
     const cat = wordScore(word('CAT'));
-    const dog = wordScore(word('DOG'));
-    expect(chainScore([word('CAT'), word('DOG')])).toBe(Math.round((cat + dog) * 1.5));
+    expect(honeyForCappedWord(word('CAT'), false)).toBe(cat);
+    expect(honeyForCappedWord(word('CAT'), true)).toBe(Math.round(cat * 1.5));
   });
 });

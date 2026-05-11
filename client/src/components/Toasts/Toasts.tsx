@@ -34,12 +34,15 @@ interface RenderedToast {
   readonly opacity: number;
 }
 
+const toastLifetime = (toast: Toast): number => toast.lifetimeMs ?? TOAST_LIFETIME_MS;
+
 const computeFrame = (toast: Toast, now: number): RenderedToast | null => {
+  const life = toastLifetime(toast);
   const age = now - toast.createdAt;
-  if (age < 0 || age >= TOAST_LIFETIME_MS) return null;
+  if (age < 0 || age >= life) return null;
   const pos = waypointViewport(toast.panel, toast.hex);
   if (!pos) return null;
-  const t = age / TOAST_LIFETIME_MS;
+  const t = age / life;
   const opacity = t < HOLD_FRACTION ? 1 : 1 - (t - HOLD_FRACTION) / (1 - HOLD_FRACTION);
   return {
     toast,
@@ -91,7 +94,11 @@ export const Toasts = () => {
             opacity,
           }}
         >
-          {toast.text}
+          {toast.variant === 'alert' ? (
+            <span className="toast-alert-inner">{toast.text}</span>
+          ) : (
+            toast.text
+          )}
         </div>
       ))}
     </div>

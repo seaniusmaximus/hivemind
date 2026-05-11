@@ -25,7 +25,8 @@ import {
   type World,
   type WorldSnapshot,
 } from '@hivemind/shared';
-import { validateWord, wordStatus } from '../game/dictionary.js';
+import { playCommandSfx } from '../game/audio/sfx.js';
+import { wordStatus } from '../game/dictionary.js';
 import {
   createRoomCode,
   openRoomConnection,
@@ -52,12 +53,16 @@ export interface Toast {
   readonly text: string;
   readonly panel: BeePanel;
   readonly hex: Hex;
-  readonly variant: 'error' | 'info';
+  readonly variant: 'error' | 'info' | 'alert';
+  /** Defaults to {@link TOAST_LIFETIME_MS} when omitted. */
+  readonly lifetimeMs?: number;
   /** `performance.now()` at creation; used to drive rise + fade animations. */
   readonly createdAt: number;
 }
 
 export const TOAST_LIFETIME_MS = 1600;
+/** Rival warning when the opponent launches a queen (flash styling + longer life). */
+export const INCOMING_QUEEN_TOAST_MS = 3800;
 const TOAST_MAX = 8;
 
 let toastCounter = 0;
@@ -105,22 +110,22 @@ interface GameStore {
 
   world: World;
   /**
-   * Paths the player has drafted for the next submission. Each path becomes
-   * one capped word when the drone is dispatched. The last entry is the path
-   * currently being extended by the active drag (if any).
+   * In-progress swipe paths and invalid words kept after release. A valid
+   * word is sent on pointer-up (`tryAutoSubmitLastCompletedDraft`); the last
+   * entry is the path currently being extended during a drag.
    */
   wordDrafts: readonly (readonly Hex[])[];
   /** Set while the user is drag-moving a letter between storage and comb tiles. */
   letterDrag: LetterDrag | null;
   /** Hex (active or empty storage) currently hovered as a drop target during letter drag. */
   dropHover: Hex | null;
-  /** Async submit in progress (awaiting dictionary). */
+  /** Set while an auto word-submit is being applied (guards double-fire). */
   submitting: boolean;
   /** Last error from a refused command (cleared on next success). */
   lastError: string | null;
   /** Active hex-anchored popup messages. The renderer drops entries older than
-   *  `TOAST_LIFETIME_MS`. New entries are appended; overflow is dropped from
-   *  the head so spam doesn't leak. */
+   *  each toast's lifetime (see {@link Toast.lifetimeMs}). New entries are appended;
+   *  overflow is dropped from the head so spam doesn't leak. */
   toasts: readonly Toast[];
   /**
    * Queen targeting mode. After {@link dispatchQueen} is called we enter a
@@ -129,6 +134,14 @@ interface GameStore {
    * pick we auto-fire the queen using {@link pickQueenLandingHex}.
    */
   queenTargeting: { readonly startedAt: number; readonly deadline: number } | null;
+
+  /** Dev/testing overlay toggled with `` ` `` or `?debug=1`. Actions only apply in solo mode. */
+  debugMode: boolean;
+  toggleDebugMode: () => void;
+  /** Spawn a queen that assaults the rival hive (`towardRival`) or your own hive (`towardSelf`) via engine dispatch. */
+  debugSpawnQueen: (toward: 'towardRival' | 'towardSelf') => void;
+  /** Add honey on the given side (clamped at zero). */
+  debugAdjustHoney: (side: Side, delta: number) => void;
 
   initSolo: (seed?: number) => void;
   tick: (dt: number) => void;
@@ -159,7 +172,13 @@ interface GameStore {
   clearError: () => void;
   /** Add a contextual popup at (panel, hex). Used by UI predicates and by
    *  engine-action wrappers below to surface failures where the user clicked. */
-  pushToast: (toast: { text: string; panel: BeePanel; hex: Hex; variant?: Toast['variant'] }) => void;
+  pushToast: (toast: {
+    text: string;
+    panel: BeePanel;
+    hex: Hex;
+    variant?: Toast['variant'];
+    lifetimeMs?: number;
+  }) => void;
 
   /** Letter movement: storage ↔ honeycomb, or reposition uncapped letters. */
   startLetterDrag: (fromHex: Hex) => void;
@@ -173,7 +192,8 @@ interface GameStore {
   endDraft: () => void;
   removeDraft: (index: number) => void;
   clearDraft: () => void;
-  submitDraft: () => Promise<void>;
+  /** After a completed swipe, attempts dictionary + engine submit for the last path only. */
+  tryAutoSubmitLastCompletedDraft: () => void;
 
   // ---- multiplayer actions ----
   /** Switch into lobby mode. No socket is opened until the player chooses to
@@ -191,6 +211,12 @@ interface GameStore {
   joinRoom: (roomCode: string, playerName: string) => void;
   /** Mark this player ready. */
   sendReady: () => void;
+  /**
+   * When the tab becomes visible again, reopen the room socket if we were in a
+   * multiplayer session and the connection dropped (common when a mobile browser
+   * suspends the tab). Safe to call repeatedly; no-ops if already connected.
+   */
+  tryReconnectRoom: () => void;
   /**
    * Test seam: install a fake {@link NetConnection} (and treat the store as
    * connected). Production code goes through {@link enterLobby}.
@@ -238,6 +264,9 @@ const draftToWord = (world: World, side: Side, path: readonly Hex[]): string =>
 /** Held in module scope so tests can inject a fake via `_setConnection`. */
 let conn: NetConnection | null = null;
 
+/** Remembered when joining/creating a room so we can HELLO again after a drop. */
+let multiplayerSession: { readonly roomCode: string; readonly playerName: string } | null = null;
+
 /** How long the player has to pick a queen landing hex before auto-firing. */
 export const QUEEN_TARGETING_MS = 5000;
 
@@ -254,7 +283,21 @@ const clearQueenTimer = () => {
   }
 };
 
-export const useGameStore = create<GameStore>((set, get) => ({
+export const useGameStore = create<GameStore>((set, get) => {
+  const wireRoomConnection = (roomCode: string, playerName: string) => {
+    conn = openRoomConnection(roomCode.toUpperCase(), {
+      onMessage: (msg) => get()._handleServerMessage(msg),
+      onStatus: (status) => {
+        set((s) => ({ net: { ...s.net, status } }));
+        if (status === 'closed' || status === 'error') {
+          conn = null;
+        }
+      },
+      onOpen: () => conn?.send({ type: 'HELLO', playerName }),
+    });
+  };
+
+  return {
   panel: 1,
   setPanel: (panel) => set({ panel }),
 
@@ -270,6 +313,59 @@ export const useGameStore = create<GameStore>((set, get) => ({
   lastError: null,
   toasts: [],
   queenTargeting: null,
+
+  debugMode: false,
+
+  toggleDebugMode: () => set((s) => ({ debugMode: !s.debugMode })),
+
+  debugSpawnQueen: (toward) => {
+    if (!get().debugMode) return;
+    if (get().mode !== 'solo') {
+      get().pushToast({
+        text: 'debug: solo mode only',
+        panel: 'self-hive',
+        hex: { q: 0, r: 0 },
+        variant: 'info',
+      });
+      return;
+    }
+    get().cancelQueenTargeting();
+    const cost = BEE_STATS.queen.honeyCost;
+    const side: Side = toward === 'towardRival' ? 'self' : 'opponent';
+    set((s) => {
+      const w = s.world;
+      if (side === 'self') {
+        const self = w.self;
+        return { world: { ...w, self: { ...self, honey: Math.max(self.honey, cost) } } };
+      }
+      const opp = w.opponent;
+      return { world: { ...w, opponent: { ...opp, honey: Math.max(opp.honey, cost) } } };
+    });
+    const r = get().applyCommand({ kind: 'dispatchQueen' }, side);
+    if (!r.ok) {
+      get().pushToast({
+        text: `debug queen: ${r.reason}`,
+        panel: 'self-hive',
+        hex: { q: 0, r: 0 },
+        variant: 'error',
+      });
+    }
+  },
+
+  debugAdjustHoney: (side, delta) => {
+    if (!get().debugMode) return;
+    if (get().mode !== 'solo') return;
+    set((s) => {
+      const p = s.world[side];
+      const nextHoney = Math.max(0, p.honey + delta);
+      return {
+        world: {
+          ...s.world,
+          [side]: { ...p, honey: nextHoney },
+        },
+      };
+    });
+  },
 
   initSolo: (seed) => {
     reseed(seed ?? Date.now() & 0xffffffff);
@@ -309,6 +405,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     // online mode. The next SNAPSHOT reconciles authoritative state.
     const r = engineApplyCommand(get().world, side, cmd);
     if (r.ok) {
+      if (side === 'self') playCommandSfx(cmd);
       set({ world: r.world, lastError: null });
     } else {
       set({ lastError: r.reason });
@@ -374,7 +471,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
     clearQueenTimer();
     const startedAt = performance.now();
     const deadline = startedAt + QUEEN_TARGETING_MS;
-    set({ queenTargeting: { startedAt, deadline } });
+    // Slide to opponent hive so the player can pick a landing hex without hunting for the panel.
+    set({ queenTargeting: { startedAt, deadline }, panel: 2 });
     queenTargetingTimer = setTimeout(() => {
       queenTargetingTimer = null;
       // If targeting was cancelled or already confirmed, do nothing.
@@ -415,11 +513,21 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   clearError: () => set({ lastError: null }),
 
-  pushToast: ({ text, panel, hex, variant = 'error' }) => {
+  pushToast: ({ text, panel, hex, variant = 'error', lifetimeMs }) => {
     set((s) => {
       const now = performance.now();
-      const live = s.toasts.filter((t) => now - t.createdAt < TOAST_LIFETIME_MS);
-      const next: Toast = { id: newToastId(), text, panel, hex, variant, createdAt: now };
+      const live = s.toasts.filter(
+        (t) => now - t.createdAt < (t.lifetimeMs ?? TOAST_LIFETIME_MS),
+      );
+      const next: Toast = {
+        id: newToastId(),
+        text,
+        panel,
+        hex,
+        variant,
+        createdAt: now,
+        ...(lifetimeMs !== undefined ? { lifetimeMs } : {}),
+      };
       // Cap the queue from the head so a burst of holds doesn't pile up off-screen.
       const trimmed = live.length >= TOAST_MAX ? live.slice(live.length - TOAST_MAX + 1) : live;
       return { toasts: [...trimmed, next] };
@@ -527,10 +635,48 @@ export const useGameStore = create<GameStore>((set, get) => ({
       set({ wordDrafts: drafts.slice(0, -1) });
       return;
     }
-    // Kick off validation in the background; status is read via wordStatus().
-    const word = draftToWord(s.world, 'self', last);
-    if (word.length >= 2 && wordStatus(word) === 'unknown') {
-      void validateWord(word);
+    // Defer one tick so multi-path tests (and any same-frame draft edits) see stable `wordDrafts`
+    // before we read the last path for submit.
+    queueMicrotask(() => {
+      get().tryAutoSubmitLastCompletedDraft();
+    });
+  },
+
+  tryAutoSubmitLastCompletedDraft: () => {
+    const s0 = get();
+    const drafts = s0.wordDrafts;
+    if (drafts.length === 0) return;
+    const path = drafts[drafts.length - 1]!;
+    if (path.length < 2) return;
+    if (s0.submitting) return;
+
+    const word = draftToWord(s0.world, 'self', path);
+    const anchor = path[0]!;
+    const toastAt = (text: string) =>
+      get().pushToast({ text, panel: 'self-hive', hex: anchor, variant: 'error' });
+
+    if (wordStatus(word) !== 'valid') {
+      toastAt(`not in dictionary: ${word || '?'}`);
+      return;
+    }
+
+    set({ submitting: true, lastError: null });
+    try {
+      const r = get().applyCommand({ kind: 'submitWords', paths: [path] }, 'self');
+      if (!r.ok) {
+        set({ submitting: false });
+        toastAt(r.reason);
+        return;
+      }
+      set((s) => ({
+        wordDrafts: s.wordDrafts.slice(0, -1),
+        submitting: false,
+        lastError: null,
+      }));
+    } catch (err) {
+      const msg = `submit failed: ${err instanceof Error ? err.message : String(err)}`;
+      set({ submitting: false, lastError: msg });
+      toastAt(msg);
     }
   },
 
@@ -542,63 +688,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
   },
 
   clearDraft: () => set({ wordDrafts: [], lastError: null }),
-
-  submitDraft: async () => {
-    const s0 = get();
-    const drafts = s0.wordDrafts;
-    if (drafts.length === 0) return;
-    if (s0.submitting) return;
-
-    // Anchor any error popup at the very first tile of the first draft path —
-    // that's the most recent thing the user touched.
-    const anchor: Hex | null = drafts[0]?.[0] ?? null;
-    const toastAt = (text: string) => {
-      if (!anchor) return;
-      get().pushToast({ text, panel: 'self-hive', hex: anchor, variant: 'error' });
-    };
-
-    set({ submitting: true, lastError: null });
-    try {
-      const words = drafts.map((p) => draftToWord(s0.world, 'self', p));
-      const results = await Promise.all(words.map((w) => validateWord(w)));
-      const validPaths = drafts.filter((_, i) => results[i]);
-      const invalidWords = words.filter((_, i) => !results[i]);
-
-      if (validPaths.length === 0) {
-        const msg = `not in dictionary: ${invalidWords.join(', ')}`;
-        set({ submitting: false, lastError: msg });
-        toastAt(msg);
-        return;
-      }
-
-      const r = get().applyCommand({ kind: 'submitWords', paths: validPaths }, 'self');
-      if (!r.ok) {
-        set({ submitting: false });
-        toastAt(r.reason);
-        return;
-      }
-      set({
-        wordDrafts: [],
-        submitting: false,
-        lastError:
-          invalidWords.length > 0
-            ? `skipped: ${invalidWords.join(', ')}`
-            : null,
-      });
-      if (invalidWords.length > 0 && anchor) {
-        get().pushToast({
-          text: `skipped: ${invalidWords.join(', ')}`,
-          panel: 'self-hive',
-          hex: anchor,
-          variant: 'error',
-        });
-      }
-    } catch (err) {
-      const msg = `submit failed: ${err instanceof Error ? err.message : String(err)}`;
-      set({ submitting: false, lastError: msg });
-      toastAt(msg);
-    }
-  },
 
   // ---- multiplayer actions ----
 
@@ -616,6 +705,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   },
 
   leaveLobby: () => {
+    multiplayerSession = null;
     if (conn) {
       // Best-effort polite leave — the server's room teardown handles it
       // even if the frame doesn't make it out.
@@ -656,25 +746,25 @@ export const useGameStore = create<GameStore>((set, get) => ({
         result: null,
       },
     }));
-    conn = openRoomConnection(code, {
-      onMessage: (msg) => get()._handleServerMessage(msg),
-      onStatus: (status) => {
-        set((s) => ({ net: { ...s.net, status } }));
-      },
-      onOpen: () => conn?.send({ type: 'HELLO', playerName }),
-    });
+    multiplayerSession = { roomCode: code.toUpperCase(), playerName };
+    wireRoomConnection(code, playerName);
   },
 
   joinRoom: (roomCode, playerName) => {
     if (conn) return;
+    multiplayerSession = { roomCode: roomCode.toUpperCase(), playerName };
     set((s) => ({ net: { ...s.net, status: 'connecting', lastError: null } }));
-    conn = openRoomConnection(roomCode, {
-      onMessage: (msg) => get()._handleServerMessage(msg),
-      onStatus: (status) => {
-        set((s) => ({ net: { ...s.net, status } }));
-      },
-      onOpen: () => conn?.send({ type: 'HELLO', playerName }),
-    });
+    wireRoomConnection(roomCode, playerName);
+  },
+
+  tryReconnectRoom: () => {
+    const { mode, net } = get();
+    if (mode !== 'lobby' && mode !== 'online') return;
+    if (!multiplayerSession) return;
+    if (net.status === 'open' || net.status === 'connecting') return;
+    conn = null;
+    set((s) => ({ net: { ...s.net, status: 'connecting', lastError: null } }));
+    wireRoomConnection(multiplayerSession.roomCode, multiplayerSession.playerName);
   },
 
   sendReady: () => {
@@ -684,6 +774,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   _setConnection: (next) => {
     conn = next;
+    if (!next) multiplayerSession = null;
     set({
       mode: next ? 'lobby' : 'solo',
       net: next
@@ -785,13 +876,38 @@ export const useGameStore = create<GameStore>((set, get) => ({
         // Errors that imply the room is unjoinable bounce us back to the
         // create/join screen so the user can try again.
         if (msg.code === 'NO_ROOM' || msg.code === 'ROOM_FULL') {
+          multiplayerSession = null;
           set({ room: null });
         }
         break;
       }
     }
   },
-}));
+};
+});
+
+let multiplayerResumeHandlersInstalled = false;
+function installMultiplayerResumeHandlers(): void {
+  if (multiplayerResumeHandlersInstalled || typeof window === 'undefined' || typeof document === 'undefined') {
+    return;
+  }
+  multiplayerResumeHandlersInstalled = true;
+
+  const resume = (): void => {
+    queueMicrotask(() => {
+      useGameStore.getState().tryReconnectRoom();
+    });
+  };
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') resume();
+  });
+  window.addEventListener('pageshow', (e: PageTransitionEvent) => {
+    if (e.persisted) resume();
+  });
+}
+
+installMultiplayerResumeHandlers();
 
 export const draftKeySet = (drafts: readonly (readonly Hex[])[]): ReadonlyMap<string, number> => {
   const m = new Map<string, number>();

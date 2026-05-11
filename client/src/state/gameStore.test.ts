@@ -393,6 +393,12 @@ describe('gameStore — net slice', () => {
     expect(sent).toEqual([{ type: 'READY' }]);
   });
 
+  test('tryReconnectRoom is a no-op when not in a multiplayer session', () => {
+    expect(useGameStore.getState().mode).toBe('solo');
+    useGameStore.getState().tryReconnectRoom();
+    expect(useGameStore.getState().net.status).toBe('idle');
+  });
+
   test('leaveLobby tears down state and re-inits a fresh solo world', () => {
     const { conn } = makeFakeConn();
     useGameStore.getState()._setConnection(conn);

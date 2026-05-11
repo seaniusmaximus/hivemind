@@ -14,16 +14,20 @@ export const wordScore = (word: readonly Letter[]): number => {
   return Math.round(base * lengthMultiplier(word.length));
 };
 
+/** Multiplier when a capping path includes at least one letter tile already in the `capped` state (branch / word-on-word). */
+export const BRANCH_REUSE_SCORE_MULTIPLIER = 1.5;
+
 /**
- * Score for a chain — multiple words capped on the same drone flight that
- * share at least one letter. Caller is expected to have validated the chain.
- *
- * The result is the honey bonus paid out at the moment the drone caps the
- * word(s); honey is the only currency in the game.
+ * Honey paid for one capped word after the drone lands. If the path crossed
+ * any already-capped letter (reuse / “word on word”), the payout uses
+ * {@link BRANCH_REUSE_SCORE_MULTIPLIER} on that word’s {@link wordScore}.
  */
-export const chainScore = (words: readonly (readonly Letter[])[]): number => {
-  if (words.length === 0) return 0;
-  const total = words.reduce((s, w) => s + wordScore(w), 0);
-  if (words.length === 1) return total;
-  return Math.round(total * 1.5);
+export const honeyForCappedWord = (
+  word: readonly Letter[],
+  crossesPriorCappedLetter: boolean,
+): number => {
+  const base = wordScore(word);
+  return crossesPriorCappedLetter
+    ? Math.round(base * BRANCH_REUSE_SCORE_MULTIPLIER)
+    : base;
 };

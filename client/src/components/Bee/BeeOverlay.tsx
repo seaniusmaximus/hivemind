@@ -12,7 +12,11 @@ import { useEffect, useRef, useState } from 'react';
 import {
   QUEEN_ACTION_INTERVAL_SECONDS,
   beeFlight,
+  distance,
+  hex,
   hexEquals,
+  hexKey,
+  neighbors,
   type Bee,
   type Hex,
 } from '@hivemind/shared';
@@ -21,6 +25,20 @@ import { subscribeRegistry, waypointViewport } from '../../game/layout.js';
 import { BeeSprite } from './BeeSprite.js';
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+const smoothstep = (t: number) => t * t * (3 - 2 * t);
+
+/** Wind-up share of the queen assault interval (rear-back before stab). */
+const QUEEN_ASSAULT_WIND_PHASE = 0.34;
+/** How far the wind-up pulls toward `from` from the target hex (along the chord). */
+const QUEEN_REAR_PULL = 0.22;
+
+/** Peak strike flash during the stab phase (0..1). */
+const strikeSparkOpacity = (stabU: number): number => {
+  if (stabU < 0.52) return 0;
+  if (stabU < 0.78) return (stabU - 0.52) / 0.26;
+  return Math.max(0, 1 - (stabU - 0.78) / 0.22);
+};
 
 const colorFor = (kind: string): string =>
   kind === 'worker'
@@ -31,14 +49,46 @@ const colorFor = (kind: string): string =>
         ? '#fff2c4'
       : 'var(--neon-cyan)';
 
-type QueenHop = { readonly from: Hex; readonly to: Hex; readonly startMs: number };
+type QueenHop = {
+  readonly from: Hex;
+  readonly to: Hex;
+  readonly startMs: number;
+  /** Engine `nextActionAt` when this hop was keyed — advances each strike even if `currentHex` is unchanged. */
+  readonly boundNextActionAt: number;
+  /** First assault after flight: wind-up starts on the target hex (matches landing), not the synthetic `from` hex. */
+  readonly landingLeadIn?: true;
+};
 
-const beeViewportPos = (
+const HIVE_HEX = hex(0, 0);
+
+/** Neighbor of `cur` farthest from the hive — reads as “approach from the rim” for the first strike. */
+const outwardStrikeFromHex = (cur: Hex): Hex => {
+  const nbrs = neighbors(cur);
+  let best = nbrs[0]!;
+  let bestD = distance(best, HIVE_HEX);
+  for (const n of nbrs) {
+    const d = distance(n, HIVE_HEX);
+    if (d > bestD || (d === bestD && hexKey(n) < hexKey(best))) {
+      best = n;
+      bestD = d;
+    }
+  }
+  return best;
+};
+
+type BeeViewportVisual = {
+  readonly x: number;
+  readonly y: number;
+  readonly rotationDeg?: number;
+  readonly strikeSpark?: { readonly cx: number; readonly cy: number; readonly opacity: number };
+};
+
+const beeViewportVisual = (
   bee: Bee,
   t: number,
   queenAssaultHopById: Map<string, QueenHop>,
   wallMs: number,
-): { x: number; y: number } | null => {
+): BeeViewportVisual | null => {
   const flight = beeFlight(bee.state);
   if (flight) {
     const total = flight.arrivesAt - flight.startedAt;
@@ -79,24 +129,127 @@ const beeViewportPos = (
   if (bee.state.kind === 'queen-assault') {
     const panel = bee.state.panel;
     const cur = bee.state.currentHex;
-    let hop = queenAssaultHopById.get(bee.id);
-    if (!hop || !hexEquals(hop.to, cur)) {
-      const from = hop?.to ?? cur;
-      hop = { from, to: cur, startMs: wallMs };
+    const nextAt = bee.state.nextActionAt;
+    const prevHop = queenAssaultHopById.get(bee.id);
+    let hop: QueenHop;
+    const prevBound = prevHop?.boundNextActionAt;
+    const nextActionAdvanced =
+      prevHop != null && prevBound !== undefined && prevBound !== nextAt;
+
+    if (!prevHop || !hexEquals(prevHop.to, cur)) {
+      // First assault hex (no prior hop): `from` is a synthetic neighbor so aim/stab still make sense
+      // (see outwardStrikeFromHex). `landingLeadIn` makes wind start at `b` so we don't jump from the flight end.
+      const hadPriorHop = prevHop != null;
+      const from = hadPriorHop ? prevHop.to : outwardStrikeFromHex(cur);
+      hop = {
+        from,
+        to: cur,
+        startMs: wallMs,
+        boundNextActionAt: nextAt,
+        ...(hadPriorHop ? {} : { landingLeadIn: true as const }),
+      };
       queenAssaultHopById.set(bee.id, hop);
+    } else if (nextActionAdvanced) {
+      // Same hex, new strike: `from === to` would skip the pose — use synthetic rim + lead-in from center.
+      hop = {
+        from: outwardStrikeFromHex(cur),
+        to: cur,
+        startMs: wallMs,
+        boundNextActionAt: nextAt,
+        landingLeadIn: true,
+      };
+      queenAssaultHopById.set(bee.id, hop);
+    } else {
+      hop = prevHop;
     }
     const a = waypointViewport(panel, hop.from);
     const b = waypointViewport(panel, hop.to);
     if (!a || !b) return null;
-    if (a.x === b.x && a.y === b.y) return a;
-    const u = Math.min(
-      1,
-      Math.max(0, (wallMs - hop.startMs) / (QUEEN_ACTION_INTERVAL_SECONDS * 1000)),
-    );
-    return { x: lerp(a.x, b.x, u), y: lerp(a.y, b.y, u) };
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy);
+    const intervalMs = QUEEN_ACTION_INTERVAL_SECONDS * 1000;
+    const u = Math.min(1, Math.max(0, (wallMs - hop.startMs) / intervalMs));
+
+    if (dist < 0.75) {
+      return { x: b.x, y: b.y, rotationDeg: 0 };
+    }
+
+    // Pull-back pose sits between target and approach direction (near `b`). Wind phase
+    // moves from the previous hex center `a` → `rearPoint` so each new hop starts at `a`
+    // (where the last stab ended) instead of a point near `b` — that was causing a visible jump.
+    const rearPoint = {
+      x: b.x + (a.x - b.x) * QUEEN_REAR_PULL,
+      y: b.y + (a.y - b.y) * QUEEN_REAR_PULL,
+    };
+    const aimDeg = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
+
+    if (u < QUEEN_ASSAULT_WIND_PHASE) {
+      const w = smoothstep(u / QUEEN_ASSAULT_WIND_PHASE);
+      const windFrom = hop.landingLeadIn === true ? b : a;
+      const px = lerp(windFrom.x, rearPoint.x, w);
+      const py = lerp(windFrom.y, rearPoint.y, w);
+      const tilt = lerp(0, -22, w);
+      return { x: px, y: py, rotationDeg: aimDeg + tilt };
+    }
+
+    const stabU = Math.min(1, Math.max(0, (u - QUEEN_ASSAULT_WIND_PHASE) / (1 - QUEEN_ASSAULT_WIND_PHASE)));
+    const s = smoothstep(stabU);
+    const px = lerp(rearPoint.x, b.x, s);
+    const py = lerp(rearPoint.y, b.y, s);
+    const tilt = lerp(-22, 14, smoothstep(stabU));
+    const sparkOp = strikeSparkOpacity(stabU);
+    const base = {
+      x: px,
+      y: py,
+      rotationDeg: aimDeg + tilt,
+    } as const;
+    return sparkOp > 0.03
+      ? {
+          ...base,
+          strikeSpark: { cx: b.x, cy: b.y, opacity: sparkOp } as const,
+        }
+      : base;
   }
   return null;
 };
+
+const STRIKE_RAY_COUNT = 8;
+const STRIKE_RAY_LEN = 13;
+
+const QueenStrikeSpark = ({
+  cx,
+  cy,
+  opacity,
+}: {
+  readonly cx: number;
+  readonly cy: number;
+  readonly opacity: number;
+}) => (
+  <g
+    className="queen-strike-spark"
+    transform={`translate(${cx},${cy})`}
+    style={{ opacity }}
+    aria-hidden
+  >
+    {Array.from({ length: STRIKE_RAY_COUNT }, (_, i) => {
+      const ang = ((Math.PI * 2) / STRIKE_RAY_COUNT) * i - Math.PI / 2;
+      const x2 = Math.cos(ang) * STRIKE_RAY_LEN;
+      const y2 = Math.sin(ang) * STRIKE_RAY_LEN;
+      return (
+        <line
+          key={i}
+          className="queen-strike-ray"
+          x1={0}
+          y1={0}
+          x2={x2}
+          y2={y2}
+        />
+      );
+    })}
+    <circle className="queen-strike-core" r={3.2} cx={0} cy={0} />
+  </g>
+);
 
 /** Letters held in flight render alongside the bee for readability. */
 const carryingLetter = (bee: Bee): string | null => {
@@ -141,22 +294,36 @@ export const BeeOverlay = () => {
     }
   }
 
+  const visuals = bees
+    .map((bee) => {
+      const vis = beeViewportVisual(bee, t, queenAssaultHopRef.current, wallMs);
+      return vis ? { bee, vis } : null;
+    })
+    .filter((v): v is { bee: Bee; vis: BeeViewportVisual } => v !== null);
+
   return (
     <svg className="bee-overlay" aria-hidden>
-      {bees.map((bee) => {
-        const pos = beeViewportPos(bee, t, queenAssaultHopRef.current, wallMs);
-        if (!pos) return null;
-        return (
-          <BeeSprite
-            key={bee.id}
-            color={colorFor(bee.kind)}
-            kind={bee.kind}
-            letter={carryingLetter(bee)}
-            x={pos.x}
-            y={pos.y}
+      {visuals.map(({ bee, vis }) =>
+        vis.strikeSpark ? (
+          <QueenStrikeSpark
+            key={`${bee.id}-strike`}
+            cx={vis.strikeSpark.cx}
+            cy={vis.strikeSpark.cy}
+            opacity={vis.strikeSpark.opacity}
           />
-        );
-      })}
+        ) : null,
+      )}
+      {visuals.map(({ bee, vis }) => (
+        <BeeSprite
+          key={bee.id}
+          color={colorFor(bee.kind)}
+          kind={bee.kind}
+          letter={carryingLetter(bee)}
+          x={vis.x}
+          y={vis.y}
+          {...(vis.rotationDeg !== undefined ? { rotationDeg: vis.rotationDeg } : {})}
+        />
+      ))}
     </svg>
   );
 };

@@ -34,7 +34,7 @@ import {
   registerGrid,
   unregisterGrid,
 } from '../../game/layout.js';
-import { HOLD_DURATION_MS, useHoldToDispatch } from '../useHoldToDispatch.js';
+import { HOLD_HINT_SECONDS, useHoldToDispatch } from '../useHoldToDispatch.js';
 
 const HEX_SIZE = 26;
 const PETAL_HEX_SIZE = HEX_SIZE * 0.92;
@@ -173,120 +173,122 @@ export const FlowerField = () => {
     return () => unregisterGrid('flowers');
   }, [extent.halfWidth, extent.halfHeight]);
 
-  const holdSeconds = (HOLD_DURATION_MS / 1000).toFixed(0);
+  const holdSeconds = HOLD_HINT_SECONDS;
   const petalBorderD = useMemo(() => holdBorderPath(PETAL_HEX_SIZE), []);
   const petalFlashD = useMemo(() => hexPath(PETAL_HEX_SIZE), []);
 
   return (
-    <div className="grid-frame">
+    <div className="grid-frame grid-frame--flowers">
       <h2 className="hud-title grid-heading">FLOWER FIELD</h2>
       <p className="grid-subtitle">
         hold a petal {holdSeconds}s to send a worker · {workerCost}🜨
       </p>
-      <svg
-        ref={svgRef}
-        className="hex-svg"
-        viewBox={viewBox}
-        preserveAspectRatio="xMidYMid meet"
-        role="img"
-        aria-label="flower field"
-        style={{ touchAction: 'none', WebkitTouchCallout: 'none' }}
-        onContextMenu={(e) => e.preventDefault()}
-      >
-        {patches.map((patch: FlowerPatch) => {
-          const cp = axialToPixel(patch.center, HEX_SIZE);
-          return (
-            <g key={patch.id} className="flower-patch" data-type={patch.type}>
-              <g transform={`translate(${cp.x},${cp.y})`}>
-                <path
-                  d={hexPath(HEX_SIZE * 0.55)}
-                  className="flower-center"
-                  data-type={patch.type}
-                />
-                <text className="flower-center-label" x={0} y={0}>
-                  {TYPE_LABEL[patch.type]}
-                </text>
-              </g>
-              {patch.petals.map((petal) => {
-                const pp = axialToPixel(petal.hex, HEX_SIZE);
-                const w = witherFactor(petal, engineT);
-                const scale = 1 - w * 0.35;
-                const petalKey = hexKey(petal.hex);
-                const k = `${patch.id}-${petalKey}`;
-                const isHeld = hold.hex !== null && hexEquals(hold.hex, petal.hex);
-                const isRejected =
-                  rejection !== null && hexEquals(rejection.hex, petal.hex);
-                const claimedBySelf = selfClaims.has(petalKey);
-                const claimedByOpp = oppClaims.has(petalKey);
-                const progress = isHeld ? hold.progress : 0;
-                return (
-                  <g
-                    key={k}
-                    transform={`translate(${pp.x},${pp.y}) scale(${scale.toFixed(3)})`}
-                    className="flower-petal"
+      <div className="flower-field-canvas">
+        <svg
+          ref={svgRef}
+          className="hex-svg hex-svg--flowers"
+          viewBox={viewBox}
+          preserveAspectRatio="xMidYMid meet"
+          role="img"
+          aria-label="flower field"
+          style={{ touchAction: 'none', WebkitTouchCallout: 'none' }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          {patches.map((patch: FlowerPatch) => {
+            const cp = axialToPixel(patch.center, HEX_SIZE);
+            return (
+              <g key={patch.id} className="flower-patch" data-type={patch.type}>
+                <g transform={`translate(${cp.x},${cp.y})`}>
+                  <path
+                    d={hexPath(HEX_SIZE * 0.55)}
+                    className="flower-center"
                     data-type={patch.type}
-                    data-withering={w > 0.001}
-                    data-holding={isHeld}
-                    style={{ opacity: 1 - w * 0.55, cursor: 'pointer' }}
-                    onPointerDown={(e) => {
-                      e.preventDefault();
-                      // Release implicit capture so the hold cancels cleanly
-                      // when the finger drifts off the petal on touch devices.
-                      try {
-                        e.currentTarget.releasePointerCapture(e.pointerId);
-                      } catch {
-                        // No active capture — ignore.
-                      }
-                      start(petal.hex);
-                    }}
-                    onPointerUp={() => cancel(petal.hex)}
-                    onPointerLeave={() => cancel(petal.hex)}
-                    onPointerCancel={() => cancel(petal.hex)}
-                  >
-                    <path
-                      d={hexPath(PETAL_HEX_SIZE)}
-                      className="petal-tile"
+                  />
+                  <text className="flower-center-label" x={0} y={0}>
+                    {TYPE_LABEL[patch.type]}
+                  </text>
+                </g>
+                {patch.petals.map((petal) => {
+                  const pp = axialToPixel(petal.hex, HEX_SIZE);
+                  const w = witherFactor(petal, engineT);
+                  const scale = 1 - w * 0.35;
+                  const petalKey = hexKey(petal.hex);
+                  const k = `${patch.id}-${petalKey}`;
+                  const isHeld = hold.hex !== null && hexEquals(hold.hex, petal.hex);
+                  const isRejected =
+                    rejection !== null && hexEquals(rejection.hex, petal.hex);
+                  const claimedBySelf = selfClaims.has(petalKey);
+                  const claimedByOpp = oppClaims.has(petalKey);
+                  const progress = isHeld ? hold.progress : 0;
+                  return (
+                    <g
+                      key={k}
+                      transform={`translate(${pp.x},${pp.y}) scale(${scale.toFixed(3)})`}
+                      className="flower-petal"
                       data-type={patch.type}
-                    />
-                    <text className="hex-letter petal-letter" x={0} y={0}>
-                      {petal.letter}
-                    </text>
-                    {claimedBySelf && !isHeld && (
+                      data-withering={w > 0.001}
+                      data-holding={isHeld}
+                      style={{ opacity: 1 - w * 0.55, cursor: 'pointer' }}
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        // Release implicit capture so the hold cancels cleanly
+                        // when the finger drifts off the petal on touch devices.
+                        try {
+                          e.currentTarget.releasePointerCapture(e.pointerId);
+                        } catch {
+                          // No active capture — ignore.
+                        }
+                        start(petal.hex);
+                      }}
+                      onPointerUp={() => cancel(petal.hex)}
+                      onPointerLeave={() => cancel(petal.hex)}
+                      onPointerCancel={() => cancel(petal.hex)}
+                    >
                       <path
-                        d={petalFlashD}
-                        className="claim-border"
-                        data-owner="self"
+                        d={hexPath(PETAL_HEX_SIZE)}
+                        className="petal-tile"
+                        data-type={patch.type}
                       />
-                    )}
-                    {claimedByOpp && (
-                      <path
-                        d={petalFlashD}
-                        className="claim-border"
-                        data-owner="opp"
-                      />
-                    )}
-                    {isHeld && (
-                      <path
-                        d={petalBorderD}
-                        className="hold-border"
-                        pathLength={100}
-                        strokeDasharray={`${(progress * 100).toFixed(2)} 100`}
-                      />
-                    )}
-                    {isRejected && (
-                      <path
-                        key={rejection.token}
-                        d={petalFlashD}
-                        className="hex-reject-flash"
-                      />
-                    )}
-                  </g>
-                );
-              })}
-            </g>
-          );
-        })}
-      </svg>
+                      <text className="hex-letter petal-letter" x={0} y={0}>
+                        {petal.letter}
+                      </text>
+                      {claimedBySelf && !isHeld && (
+                        <path
+                          d={petalFlashD}
+                          className="claim-border"
+                          data-owner="self"
+                        />
+                      )}
+                      {claimedByOpp && (
+                        <path
+                          d={petalFlashD}
+                          className="claim-border"
+                          data-owner="opp"
+                        />
+                      )}
+                      {isHeld && (
+                        <path
+                          d={petalBorderD}
+                          className="hold-border"
+                          pathLength={100}
+                          strokeDasharray={`${(progress * 100).toFixed(2)} 100`}
+                        />
+                      )}
+                      {isRejected && (
+                        <path
+                          key={rejection.token}
+                          d={petalFlashD}
+                          className="hex-reject-flash"
+                        />
+                      )}
+                    </g>
+                  );
+                })}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
     </div>
   );
 };

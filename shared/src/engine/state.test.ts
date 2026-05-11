@@ -552,18 +552,16 @@ describe('engine: drone caps a placed word', () => {
   });
 });
 
-describe('engine: chain bonus on shared tile', () => {
-  test('two paths sharing a tile pay the chain-multiplied honey bonus', () => {
+describe('engine: branch reuse honey bonus', () => {
+  test('two paths sharing only uncapped letters pay sum without reuse bonus', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
-    // Two L-shaped words sharing the corner at (0,-2).
     const w1 = [hex(-2, 0), hex(-1, -1), hex(0, -2)] as const;
     const w2 = [hex(0, -2), hex(1, -2), hex(2, -2)] as const;
     w = {
       ...w,
       self: {
         ...w.self,
-        // Low starting honey so the +15 chain bonus has headroom under the cap.
         honey: 8,
         tiles: w.self.tiles.map((t) => {
           if (hexEquals(t.hex, w1[0])) return { ...t, state: 'letter', letter: 'C' };
@@ -578,21 +576,39 @@ describe('engine: chain bonus on shared tile', () => {
     const submit = trySubmitWord(w, 'self', [w1, w2]);
     expect(submit.ok).toBe(true);
     if (!submit.ok) return;
-    expect(submit.world.self.honey).toBe(8);
     const after = advance(submit.world, 4.0, rng);
-    // CAT (5) + TAB (5) = 10 baseline; chain ×1.5 → 15. Floor allowing for
-    // some passive regen before the bonus lands and any chain-bonus log
-    // entry.
-    expect(after.self.honey).toBeGreaterThanOrEqual(15);
+    // CAT (5) + TAB (5) = 10; no prior-capped tiles in either path → no 1.5×.
+    expect(after.self.honey).toBeGreaterThan(16);
     expect(after.self.tiles.filter((t) => t.state === 'capped').length).toBeGreaterThanOrEqual(5);
-    expect(
-      after.log.some(
-        (e) => e.text.includes('CAT') && e.text.includes('TAB') && e.text.includes('chain'),
-      ),
-    ).toBe(true);
+    expect(after.log.every((e) => !e.text.includes('reuse'))).toBe(true);
   });
 
-  test('two non-overlapping words pay only the sum (no chain bonus)', () => {
+  test('a word through a prior-capped letter pays 1.5× that word score', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const corner = hex(0, -2);
+    w = {
+      ...w,
+      self: {
+        ...w.self,
+        honey: 8,
+        tiles: w.self.tiles.map((t) => {
+          if (hexEquals(t.hex, corner)) return { ...t, state: 'capped', letter: 'A' };
+          if (hexEquals(t.hex, hex(1, -2))) return { ...t, state: 'letter', letter: 'T' };
+          return t;
+        }),
+      },
+    };
+    const submit = trySubmitWord(w, 'self', [[corner, hex(1, -2)]]);
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+    const after = advance(submit.world, 3.0, rng);
+    // AT base 2 → ×1.5 = 3 honey, plus passive regen from 8.
+    expect(after.self.honey).toBeGreaterThanOrEqual(11);
+    expect(after.log.some((e) => e.text.includes('AT') && e.text.includes('reuse'))).toBe(true);
+  });
+
+  test('two non-overlapping words pay only the sum (no reuse bonus)', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
     const w1 = [hex(-2, 0), hex(-1, -1)] as const;
@@ -615,9 +631,9 @@ describe('engine: chain bonus on shared tile', () => {
     expect(submit.ok).toBe(true);
     if (!submit.ok) return;
     const after = advance(submit.world, 4.0, rng);
-    // AT (2) + BE (4) = 6 baseline, no chain bonus, no chain tag in log.
+    // AT (2) + BE (4) = 6 baseline, no prior-capped letters.
     expect(after.self.honey).toBeGreaterThanOrEqual(14); // 8 (no drone cost) + 6
-    expect(after.log.every((e) => !e.text.includes('chain'))).toBe(true);
+    expect(after.log.every((e) => !e.text.includes('reuse'))).toBe(true);
   });
 });
 

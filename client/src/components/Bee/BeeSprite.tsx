@@ -17,6 +17,8 @@ type Props = {
   readonly letter: string | null;
   readonly x: number;
   readonly y: number;
+  /** Degrees; rotation about bee center after translate (e.g. queen stab tilt). */
+  readonly rotationDeg?: number;
 };
 
 const BODY_SIZE = 6;
@@ -39,7 +41,14 @@ const hexPath = (size: number): string => {
 const BODY_PATH = hexPath(BODY_SIZE);
 const WING_PATH = hexPath(WING_SIZE);
 
-export const BeeSprite = ({ color, kind, letter, x, y }: Props) => {
+export const BeeSprite = ({
+  color,
+  kind,
+  letter,
+  x,
+  y,
+  rotationDeg = 0,
+}: Props) => {
   const leftWingRef = useRef<SVGGElement | null>(null);
   const rightWingRef = useRef<SVGGElement | null>(null);
 
@@ -76,7 +85,7 @@ export const BeeSprite = ({ color, kind, letter, x, y }: Props) => {
   return (
     <g
       className="bee"
-      transform={`translate(${x},${y})`}
+      transform={`translate(${x},${y}) rotate(${rotationDeg})`}
       data-kind={kind}
       style={{ color }}
     >

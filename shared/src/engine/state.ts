@@ -53,7 +53,7 @@ import {
   range,
   type Hex,
 } from '../hex.js';
-import { chainScore, wordScore } from '../scoring.js';
+import { honeyForCappedWord, wordScore } from '../scoring.js';
 import { hexHpForTile } from '../tileHp.js';
 import type {
   ActivityEntry,
@@ -107,7 +107,7 @@ export const QUEEN_LIFETIME_SECONDS = QUEEN_ASSAULT_DURATION_SECONDS;
 /** Seconds between queen strikes / steps during {@link BeeState} `queen-assault`. */
 export const QUEEN_ACTION_INTERVAL_SECONDS = 0.72;
 /** Damage dealt to a hex per queen strike (during {@link BeeState} `queen-assault`). */
-export const QUEEN_DAMAGE_PER_STRIKE = 2;
+export const QUEEN_DAMAGE_PER_STRIKE = 1;
 const FREED_LETTER_LIFETIME_SECONDS = 6;
 const LOG_MAX_ENTRIES = 14;
 const PATCH_TYPES: readonly FlowerType[] = ['vowel', 'common', 'rare'];
@@ -855,6 +855,8 @@ const resolveSideBees = (world: World, side: Side): World => {
     if (bee.state.kind === 'capping') {
       const paths = bee.state.paths;
       const wordsLetters: Letter[][] = [];
+      /** True when this path used at least one hex already `capped` before this cap (branch reuse). */
+      const crossesPriorCappedByWord: boolean[] = [];
       const allCappedHexes: Hex[] = [];
       const reuseIncrementsByKey = new Map<string, number>();
       for (const path of paths) {
@@ -872,6 +874,7 @@ const resolveSideBees = (world: World, side: Side): World => {
         }
         if (valid && letters.length >= 2) {
           wordsLetters.push(letters);
+          crossesPriorCappedByWord.push(cappedHitsThisPath.length > 0);
           for (const h of path) {
             if (!allCappedHexes.some((c) => hexEquals(c, h))) allCappedHexes.push(h);
           }
@@ -888,14 +891,11 @@ const resolveSideBees = (world: World, side: Side): World => {
         }
       }
       if (wordsLetters.length > 0) {
-        const sharesTile =
-          wordsLetters.length >= 2 &&
-          paths.some((p1, i) =>
-            paths.some((p2, j) => i < j && p1.some((a) => p2.some((b) => hexEquals(a, b)))),
-          );
-        const bonus = sharesTile
-          ? chainScore(wordsLetters)
-          : wordsLetters.reduce((s, w) => s + wordScore(w), 0);
+        const bonus = wordsLetters.reduce(
+          (s, letters, i) =>
+            s + honeyForCappedWord(letters, crossesPriorCappedByWord[i] ?? false),
+          0,
+        );
         updatedPlayer = {
           ...updatedPlayer,
           tiles: updatedPlayer.tiles.map((t) => {
@@ -912,7 +912,7 @@ const resolveSideBees = (world: World, side: Side): World => {
         };
         updatedPlayer = grantHoney(updatedPlayer, bonus);
         const summary = wordsLetters.map((w) => w.join('')).join(' + ');
-        const tag = sharesTile && wordsLetters.length >= 2 ? ' chain!' : '';
+        const tag = crossesPriorCappedByWord.some(Boolean) ? ' reuse!' : '';
         next = logEvent(next, {
           t: next.t,
           ownerId: player.id,

@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { playGameOver } from '../../game/audio/sfx.js';
 import { useGameStore } from '../../state/gameStore.js';
 
 export const GameOver = () => {
@@ -26,11 +27,36 @@ export const GameOver = () => {
   const onlineResult = room?.result ?? null;
   const isOver = mode === 'online' ? onlineResult !== null : phase === 'over';
 
+  const wonOnline =
+    onlineResult && room
+      ? onlineResult.winnerId === null
+        ? null
+        : onlineResult.winnerId === room.selfId
+      : null;
+
   // Reset the optimistic flag whenever we leave the game-over screen so a
   // subsequent match starts with a clean slate.
   useEffect(() => {
     if (!isOver) setRematchClicked(false);
   }, [isOver]);
+
+  const endStingerPlayed = useRef(false);
+  useEffect(() => {
+    if (!isOver) {
+      endStingerPlayed.current = false;
+      return;
+    }
+    if (endStingerPlayed.current) return;
+    endStingerPlayed.current = true;
+    let outcome: 'win' | 'lose' | 'draw';
+    if (onlineResult && room) {
+      if (onlineResult.winnerId === null) outcome = 'draw';
+      else outcome = onlineResult.winnerId === room.selfId ? 'win' : 'lose';
+    } else if (winner === 'self') outcome = 'win';
+    else if (winner === 'opponent') outcome = 'lose';
+    else outcome = 'draw';
+    playGameOver(outcome);
+  }, [isOver, onlineResult, winner, room]);
 
   if (!isOver) return null;
 
@@ -39,11 +65,6 @@ export const GameOver = () => {
   const selfReady = !!selfPlayer?.ready || rematchClicked;
   const opponentReady = !!opponentPlayer?.ready;
   const opponentPresent = !!opponentPlayer;
-
-  const wonOnline =
-    onlineResult && room
-      ? onlineResult.winnerId === room.selfId
-      : null;
 
   const heading = onlineResult
     ? wonOnline === null

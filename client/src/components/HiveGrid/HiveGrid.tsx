@@ -20,7 +20,7 @@ import {
   registerGrid,
   unregisterGrid,
 } from '../../game/layout.js';
-import { HOLD_DURATION_MS, useHoldToDispatch } from '../useHoldToDispatch.js';
+import { HOLD_HINT_SECONDS, useHoldToDispatch } from '../useHoldToDispatch.js';
 
 interface Props {
   side: Side;
@@ -381,7 +381,7 @@ export const HiveGrid = ({ side }: Props) => {
   // (it rides the pointer-following ghost).
   const draggingFromKey = letterDrag ? hexKey(letterDrag.fromHex) : null;
 
-  const holdSeconds = (HOLD_DURATION_MS / 1000).toFixed(0);
+  const holdSeconds = HOLD_HINT_SECONDS;
 
   return (
     <div className="grid-frame">

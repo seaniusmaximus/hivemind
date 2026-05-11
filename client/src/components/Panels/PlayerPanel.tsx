@@ -1,6 +1,6 @@
 import { HiveGrid } from '../HiveGrid/HiveGrid.js';
 import { ControlsPanel } from './ControlsPanel.js';
-import { WordBuilderPanel } from './WordBuilderPanel.js';
+import { OpponentBoardMini } from './OpponentBoardMini.js';
 
 /**
  * Player-facing panel: hex grid centered with control sidebars in the empty
@@ -18,7 +18,7 @@ export const PlayerPanel = () => {
         <HiveGrid side="self" />
       </div>
       <aside className="player-panel-side player-panel-right">
-        <WordBuilderPanel />
+        <OpponentBoardMini />
       </aside>
     </div>
   );

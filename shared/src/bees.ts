@@ -26,8 +26,8 @@ export const BEE_STATS: Readonly<Record<BeeKind, BeeStats>> = {
  *
  * Honey is the only resource. It is generated passively at a rate
  * proportional to your hive size, and stored up to a cap that scales with
- * how many honeycomb hexes you own. Word caps and chains pay out additional
- * honey on top.
+ * how many honeycomb hexes you own. Capping words pays honey; paths that
+ * reuse already-capped letters earn a branch bonus (see scoring).
  *
  * - `regenPerHex` is multiplied by the total number of owned hex tiles
  *   (hive + storage + active + letter + capped) to get your per-second base

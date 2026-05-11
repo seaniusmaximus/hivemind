@@ -24,7 +24,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { hexEquals, type Hex } from '@hivemind/shared';
 
-export const HOLD_DURATION_MS = 500;
+export const HOLD_DURATION_MS = 250;
+
+const holdSecondsValue = HOLD_DURATION_MS / 1000;
+/** Copy for subtitles / hints — avoids showing "0s" when the hold is sub-second. */
+export const HOLD_HINT_SECONDS = Number.isInteger(holdSecondsValue)
+  ? String(holdSecondsValue)
+  : holdSecondsValue.toFixed(1);
+
 /** How long the red rejection flash plays for before clearing itself. */
 export const REJECT_FLASH_MS = 600;
 

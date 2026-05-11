@@ -7,14 +7,14 @@
 
 import { BEE_STATS } from '@hivemind/shared';
 import { useGameStore } from '../../state/gameStore.js';
-import { HOLD_DURATION_MS } from '../useHoldToDispatch.js';
+import { HOLD_HINT_SECONDS } from '../useHoldToDispatch.js';
 
 export const ControlsPanel = () => {
   const honey = useGameStore((s) => Math.floor(s.world.self.honey));
   const workerCost = BEE_STATS.worker.honeyCost;
   const carpenterCost = BEE_STATS.carpenter.honeyCost;
   const queenCost = BEE_STATS.queen.honeyCost;
-  const holdSeconds = (HOLD_DURATION_MS / 1000).toFixed(0);
+  const holdSeconds = HOLD_HINT_SECONDS;
 
   return (
     <div className="controls-panel">
