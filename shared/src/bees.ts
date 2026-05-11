@@ -107,9 +107,10 @@ export type BeeState =
       readonly flight: BeeFlight;
     }
   | {
-      readonly kind: 'worker-flying-to-drop';
+      readonly kind: 'worker-flying-to-door-carrying';
       readonly queue: readonly Hex[];
       readonly carrying: Letter;
+      /** Preferred storage hex; letter is applied on arrival at the hive door. */
       readonly dropTile: Hex;
       readonly flight: BeeFlight;
     }
@@ -162,7 +163,7 @@ export type BeeState =
 export const beeFlight = (state: BeeState): BeeFlight | null => {
   switch (state.kind) {
     case 'worker-flying-to-flower':
-    case 'worker-flying-to-drop':
+    case 'worker-flying-to-door-carrying':
     case 'worker-flying-to-freed':
     case 'worker-returning':
     case 'carpenter-flying':

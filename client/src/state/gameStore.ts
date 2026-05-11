@@ -26,6 +26,7 @@ import {
   type WorldSnapshot,
 } from '@hivemind/shared';
 import { playCommandSfx } from '../game/audio/sfx.js';
+import { resetWordCapHoneyToastSeen } from '../game/wordCapHoneyToastSeen.js';
 import { wordStatus } from '../game/dictionary.js';
 import {
   createRoomCode,
@@ -381,6 +382,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       queenTargeting: null,
       panel: 1,
     });
+    resetWordCapHoneyToastSeen(get().world.log.map((e) => e.id));
   },
 
   tick: (dt) => {
@@ -829,6 +831,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
       case 'SNAPSHOT': {
         set({ world: snapshotToWorld(msg.world) });
+        resetWordCapHoneyToastSeen(get().world.log.map((e) => e.id));
         break;
       }
       case 'COMMAND_RESULT': {

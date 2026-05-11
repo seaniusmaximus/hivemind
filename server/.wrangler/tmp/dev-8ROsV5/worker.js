@@ -554,11 +554,11 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
           remainingBees.push({
             ...bee,
             state: {
-              kind: "worker-flying-to-drop",
+              kind: "worker-flying-to-door-carrying",
               queue: bee.state.queue,
               carrying: found.petal.letter,
               dropTile: drop.hex,
-              flight: flight("flowers", target, sideHivePanel(side), drop.hex, next.t, FLIGHT_TIMES.flowerToHive)
+              flight: flight("flowers", target, sideHivePanel(side), hex(0, 0), next.t, FLIGHT_TIMES.flowerToHive)
             }
           });
           next = logEvent(next, {
@@ -598,7 +598,7 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
       beesChanged = true;
       continue;
     }
-    if (bee.state.kind === "worker-flying-to-drop") {
+    if (bee.state.kind === "worker-flying-to-door-carrying") {
       const dropTile = bee.state.dropTile;
       const letter = bee.state.carrying;
       const tile = updatedPlayer.tiles.find((t) => hexEquals(t.hex, dropTile));
@@ -642,18 +642,10 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
             kind: "worker-flying-to-flower",
             queue: rest,
             target: nextTarget,
-            flight: flight(sideHivePanel(side), dropTile, "flowers", nextTarget, next.t, FLIGHT_TIMES.hiveToFlower)
+            flight: flight(sideHivePanel(side), hex(0, 0), "flowers", nextTarget, next.t, FLIGHT_TIMES.hiveToFlower)
           }
         });
       } else {
-        remainingBees.push({
-          ...bee,
-          capacity: newCapacity,
-          state: {
-            kind: "worker-returning",
-            flight: flight(sideHivePanel(side), dropTile, sideHivePanel(side), hex(0, 0), next.t, FLIGHT_TIMES.hiveToHive)
-          }
-        });
       }
       beesChanged = true;
       continue;
@@ -689,11 +681,11 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
         remainingBees.push({
           ...bee,
           state: {
-            kind: "worker-flying-to-drop",
+            kind: "worker-flying-to-door-carrying",
             queue: [],
             carrying: found.letter,
             dropTile: drop.hex,
-            flight: flight(sideHivePanel(side), freedTargetHex, sideHivePanel(side), drop.hex, next.t, FLIGHT_TIMES.tileToHive)
+            flight: flight(sideHivePanel(side), freedTargetHex, sideHivePanel(side), hex(0, 0), next.t, FLIGHT_TIMES.tileToHive)
           }
         });
       }
@@ -1061,7 +1053,7 @@ var tickQueens = /* @__PURE__ */ __name((world) => {
 var arrivalOf = /* @__PURE__ */ __name((bee) => {
   switch (bee.state.kind) {
     case "worker-flying-to-flower":
-    case "worker-flying-to-drop":
+    case "worker-flying-to-door-carrying":
     case "worker-flying-to-freed":
     case "worker-returning":
     case "carpenter-flying":
@@ -1311,7 +1303,7 @@ var flipBeePanels = /* @__PURE__ */ __name((bee) => {
   let next;
   switch (s.kind) {
     case "worker-flying-to-flower":
-    case "worker-flying-to-drop":
+    case "worker-flying-to-door-carrying":
     case "worker-flying-to-freed":
     case "worker-returning":
     case "carpenter-flying":
@@ -1894,7 +1886,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-coASPQ/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-a0i4WC/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -1926,7 +1918,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-coASPQ/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-a0i4WC/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;

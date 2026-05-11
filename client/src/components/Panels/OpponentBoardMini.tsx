@@ -19,6 +19,7 @@ const MINI_PATH = hexPathD(MINI_HEX);
 
 export const OpponentBoardMini = () => {
   const tiles = useGameStore((s) => s.world.opponent.tiles);
+  const rivalHoney = useGameStore((s) => Math.floor(s.world.opponent.honey));
 
   const { vbW, vbH, paths } = useMemo(() => {
     const hexes = tiles.map((t) => t.hex);
@@ -33,7 +34,12 @@ export const OpponentBoardMini = () => {
 
   return (
     <div className="rival-board-mini" aria-label="Rival hive layout: gold is capped comb">
-      <div className="rival-board-mini-label">Rival hive</div>
+      <div className="rival-board-mini-header">
+        <span className="rival-board-mini-label">Rival hive</span>
+        <span className="rival-board-mini-honey" aria-label={`Rival honey ${rivalHoney}`}>
+          {rivalHoney}🜨
+        </span>
+      </div>
       <svg
         className="rival-board-mini-svg"
         viewBox={`${-vbW / 2} ${-vbH / 2} ${vbW} ${vbH}`}

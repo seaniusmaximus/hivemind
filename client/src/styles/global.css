@@ -794,6 +794,19 @@ button.ghost {
   box-shadow: 0 0 16px rgba(255, 95, 163, 0.15) inset;
 }
 
+.rival-board-mini-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.rival-board-mini-header .rival-board-mini-label {
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+}
+
 .rival-board-mini-label {
   margin: 0;
   font-family: 'Press Start 2P', system-ui, sans-serif;
@@ -802,6 +815,17 @@ button.ghost {
   color: var(--neon-pink);
   text-shadow: 0 0 6px rgba(255, 95, 163, 0.55);
   text-align: center;
+}
+
+.rival-board-mini-honey {
+  font-family: 'Press Start 2P', system-ui, sans-serif;
+  font-size: 0.55rem;
+  letter-spacing: 0.04em;
+  color: var(--honey);
+  text-shadow:
+    0 0 8px rgba(255, 196, 65, 0.45),
+    0 0 14px rgba(255, 196, 65, 0.25);
+  white-space: nowrap;
 }
 
 .rival-board-mini-svg {
@@ -918,6 +942,13 @@ button.ghost {
   stroke: #fff2c4;
   stroke-width: 2.5;
   filter: drop-shadow(0 0 8px var(--honey)) drop-shadow(0 0 16px rgba(255, 176, 20, 0.5));
+}
+
+.hive-door {
+  fill: #0a0a0a;
+  stroke: rgba(0, 0, 0, 0.55);
+  stroke-width: 0.35;
+  stroke-linejoin: round;
 }
 
 .hex-tile[data-state='storage'] {
@@ -1513,7 +1544,8 @@ button.ghost {
     gap: 0.3rem;
   }
 
-  .rival-board-mini-label {
+  .rival-board-mini-label,
+  .rival-board-mini-honey {
     font-size: 0.48rem;
   }
 
@@ -1562,7 +1594,8 @@ button.ghost {
   }
 
   .controls-row-cost,
-  .rival-board-mini-label {
+  .rival-board-mini-label,
+  .rival-board-mini-honey {
     font-size: 0.5rem;
   }
 }

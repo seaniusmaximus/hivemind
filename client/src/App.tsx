@@ -9,6 +9,7 @@ import { GameOver } from './components/Hud/GameOver.js';
 import { BeeOverlay } from './components/Bee/BeeOverlay.js';
 import { DragGhost } from './components/Bee/DragGhost.js';
 import { IncomingQueenWatcher } from './components/Toasts/IncomingQueenWatcher.js';
+import { WordCapHoneyWatcher } from './components/Toasts/WordCapHoneyWatcher.js';
 import { Toasts } from './components/Toasts/Toasts.js';
 import { Lobby } from './components/Lobby/Lobby.js';
 import { resumeSfxContext } from './game/audio/sfx.js';
@@ -54,6 +55,7 @@ export const App = () => {
       <BeeOverlay />
       <DragGhost />
       <IncomingQueenWatcher />
+      <WordCapHoneyWatcher />
       <Toasts />
       <GameOver />
       {mode === 'lobby' ? <Lobby /> : null}

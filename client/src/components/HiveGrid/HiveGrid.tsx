@@ -17,6 +17,9 @@ import {
 import { useGameStore, draftKeySet } from '../../state/gameStore.js';
 import {
   centeredViewBoxExtent,
+  HIVE_DOOR_HEX_FR,
+  HIVE_DOOR_UPSHIFT_FR,
+  HIVE_HEX_DRAW_SCALE,
   registerGrid,
   unregisterGrid,
 } from '../../game/layout.js';
@@ -451,7 +454,7 @@ export const HiveGrid = ({ side }: Props) => {
                 (t.state === 'hive' && canSpawnQueen)));
           const tileSize =
             t.state === 'hive'
-              ? HEX_SIZE * 1.05
+              ? HEX_SIZE * HIVE_HEX_DRAW_SCALE
               : t.state === 'storage'
                 ? HEX_SIZE * 0.78
                 : HEX_SIZE;
@@ -495,6 +498,14 @@ export const HiveGrid = ({ side }: Props) => {
                     />
                   );
                 })}
+              {t.state === 'hive' && (
+                <path
+                  className="hive-door"
+                  d={hexPath(tileSize * HIVE_DOOR_HEX_FR)}
+                  transform={`translate(0,${tileSize * (1 - HIVE_DOOR_HEX_FR - HIVE_DOOR_UPSHIFT_FR)})`}
+                  pointerEvents="none"
+                />
+              )}
               {t.state === 'hive' && (
                 <text className="hive-honey" x={0} y={0}>
                   {Math.floor(player.honey)}

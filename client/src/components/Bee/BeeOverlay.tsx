@@ -21,7 +21,7 @@ import {
   type Hex,
 } from '@hivemind/shared';
 import { useGameStore } from '../../state/gameStore.js';
-import { subscribeRegistry, waypointViewport } from '../../game/layout.js';
+import { beeWaypointViewport, subscribeRegistry } from '../../game/layout.js';
 import { BeeSprite } from './BeeSprite.js';
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -93,8 +93,8 @@ const beeViewportVisual = (
   if (flight) {
     const total = flight.arrivesAt - flight.startedAt;
     const progress = total <= 0 ? 1 : Math.min(1, Math.max(0, (t - flight.startedAt) / total));
-    const a = waypointViewport(flight.from.panel, flight.from.hex);
-    const b = waypointViewport(flight.to.panel, flight.to.hex);
+    const a = beeWaypointViewport(flight.from.panel, flight.from.hex);
+    const b = beeWaypointViewport(flight.to.panel, flight.to.hex);
     if (!a || !b) return null;
     return { x: lerp(a.x, b.x, progress), y: lerp(a.y, b.y, progress) };
   }
@@ -105,7 +105,7 @@ const beeViewportVisual = (
     const total = bee.state.arrivesAt - bee.state.startedAt;
     if (total <= 0 || paths.length === 0) {
       const first = paths[0]?.[0];
-      return first ? waypointViewport(bee.state.panel, first) : null;
+      return first ? beeWaypointViewport(bee.state.panel, first) : null;
     }
     const progress = Math.min(1, Math.max(0, (t - bee.state.startedAt) / total));
     const segCounts = paths.map((p) => Math.max(1, p.length - 1));
@@ -117,12 +117,12 @@ const beeViewportVisual = (
       pi += 1;
     }
     const path = paths[pi]!;
-    if (path.length === 1) return waypointViewport(bee.state.panel, path[0]!);
+    if (path.length === 1) return beeWaypointViewport(bee.state.panel, path[0]!);
     const local = Math.min(g, segCounts[pi]!);
     const i = Math.min(path.length - 2, Math.floor(local));
     const segT = local - i;
-    const a = waypointViewport(bee.state.panel, path[i]!);
-    const b = waypointViewport(bee.state.panel, path[i + 1]!);
+    const a = beeWaypointViewport(bee.state.panel, path[i]!);
+    const b = beeWaypointViewport(bee.state.panel, path[i + 1]!);
     if (!a || !b) return null;
     return { x: lerp(a.x, b.x, segT), y: lerp(a.y, b.y, segT) };
   }
@@ -162,8 +162,8 @@ const beeViewportVisual = (
     } else {
       hop = prevHop;
     }
-    const a = waypointViewport(panel, hop.from);
-    const b = waypointViewport(panel, hop.to);
+    const a = beeWaypointViewport(panel, hop.from);
+    const b = beeWaypointViewport(panel, hop.to);
     if (!a || !b) return null;
     const dx = b.x - a.x;
     const dy = b.y - a.y;
@@ -253,7 +253,7 @@ const QueenStrikeSpark = ({
 
 /** Letters held in flight render alongside the bee for readability. */
 const carryingLetter = (bee: Bee): string | null => {
-  if (bee.state.kind === 'worker-flying-to-drop') return bee.state.carrying;
+  if (bee.state.kind === 'worker-flying-to-door-carrying') return bee.state.carrying;
   return null;
 };
 

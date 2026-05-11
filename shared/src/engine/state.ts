@@ -632,7 +632,7 @@ const resolveSideBees = (world: World, side: Side): World => {
           remainingBees.push({
             ...bee,
             state: {
-              kind: 'worker-flying-to-drop',
+              kind: 'worker-flying-to-door-carrying',
               queue: bee.state.queue,
               carrying: found.petal.letter,
               dropTile: drop.hex,
@@ -640,7 +640,7 @@ const resolveSideBees = (world: World, side: Side): World => {
                 'flowers',
                 target,
                 sideHivePanel(side),
-                drop.hex,
+                hex(0, 0),
                 next.t,
                 FLIGHT_TIMES.flowerToHive,
               ),
@@ -699,11 +699,10 @@ const resolveSideBees = (world: World, side: Side): World => {
       continue;
     }
 
-    if (bee.state.kind === 'worker-flying-to-drop') {
+    if (bee.state.kind === 'worker-flying-to-door-carrying') {
       const dropTile = bee.state.dropTile;
       const letter = bee.state.carrying;
-      // Place into the chosen storage slot if still empty; otherwise try
-      // another empty slot; otherwise the letter is lost.
+      // Letter lands when the bee reaches the hive door — no separate hop to a storage hex.
       const tile = updatedPlayer.tiles.find((t) => hexEquals(t.hex, dropTile));
       if (tile && tile.state === 'storage' && !tile.letter) {
         updatedPlayer = {
@@ -751,7 +750,7 @@ const resolveSideBees = (world: World, side: Side): World => {
             target: nextTarget,
             flight: flight(
               sideHivePanel(side),
-              dropTile,
+              hex(0, 0),
               'flowers',
               nextTarget,
               next.t,
@@ -760,21 +759,7 @@ const resolveSideBees = (world: World, side: Side): World => {
           },
         });
       } else {
-        remainingBees.push({
-          ...bee,
-          capacity: newCapacity,
-          state: {
-            kind: 'worker-returning',
-            flight: flight(
-              sideHivePanel(side),
-              dropTile,
-              sideHivePanel(side),
-              hex(0, 0),
-              next.t,
-              FLIGHT_TIMES.hiveToHive,
-            ),
-          },
-        });
+        // Bee despawns at the door after depositing the letter.
       }
       beesChanged = true;
       continue;
@@ -827,7 +812,7 @@ const resolveSideBees = (world: World, side: Side): World => {
         remainingBees.push({
           ...bee,
           state: {
-            kind: 'worker-flying-to-drop',
+            kind: 'worker-flying-to-door-carrying',
             queue: [],
             carrying: found.letter,
             dropTile: drop.hex,
@@ -835,7 +820,7 @@ const resolveSideBees = (world: World, side: Side): World => {
               sideHivePanel(side),
               freedTargetHex,
               sideHivePanel(side),
-              drop.hex,
+              hex(0, 0),
               next.t,
               FLIGHT_TIMES.tileToHive,
             ),
@@ -1271,7 +1256,7 @@ const tickQueens = (world: World): World => {
 const arrivalOf = (bee: Bee): number | null => {
   switch (bee.state.kind) {
     case 'worker-flying-to-flower':
-    case 'worker-flying-to-drop':
+    case 'worker-flying-to-door-carrying':
     case 'worker-flying-to-freed':
     case 'worker-returning':
     case 'carpenter-flying':
@@ -1292,9 +1277,10 @@ export type CommandResult =
   | { ok: false; world: World; reason: string };
 
 /**
- * Hold-to-send: spawn a single-trip worker bee that flies to one petal,
- * collects it, drops it in an empty storage slot, and returns. There is no
- * queue — every dispatch costs `worker.honeyCost`.
+ * Hold-to-send: spawn a single-trip worker bee that leaves the hive door,
+ * flies to one petal (or a freed letter on the hive), and returns to the door
+ * with the letter — storage is filled when the bee reaches the door (no
+ * separate hop to a storage hex). Every dispatch costs `worker.honeyCost`.
  */
 export const dispatchWorker = (world: World, side: Side, target: Hex): CommandResult => {
   const player = world[side];
@@ -1627,7 +1613,7 @@ const flipBeePanels = (bee: Bee): Bee => {
   let next: BeeState;
   switch (s.kind) {
     case 'worker-flying-to-flower':
-    case 'worker-flying-to-drop':
+    case 'worker-flying-to-door-carrying':
     case 'worker-flying-to-freed':
     case 'worker-returning':
     case 'carpenter-flying':
