@@ -63,7 +63,7 @@ const holdBorderPath = (size: number): string => {
 const TYPE_LABEL: Record<FlowerType, string> = {
   vowel: 'VOWEL',
   common: 'COMMON',
-  rare: 'RARE',
+  rare: 'UNCOMMON',
 };
 
 /** Returns 0..1 wither factor: 0 = fresh, 1 = about to drop. */

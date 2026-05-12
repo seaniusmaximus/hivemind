@@ -7,7 +7,7 @@ interface Props {
   children: readonly ReactNode[];
 }
 
-const PANEL_LABELS = ['YOUR HIVE', 'FLOWERS', 'OPPONENT'] as const;
+const PANEL_LABELS = ['YOUR HIVE', 'FLOWERS', 'RIVAL HIVE'] as const;
 
 /** Min horizontal travel (in px) before a pointer drag is treated as a panel
  *  swipe. Tuned so a deliberate flick reliably navigates without stealing

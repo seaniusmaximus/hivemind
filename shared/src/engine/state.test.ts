@@ -1,4 +1,4 @@
-import { hex, hexEquals } from '../hex.js';
+import { hex, hexEquals, hexKey } from '../hex.js';
 import { BEE_STATS, HEXES_PER_QUEEN_SLOT, HIVE } from '../bees.js';
 import { makeRng } from '../letters.js';
 import type { Petal } from '../messages.js';
@@ -15,6 +15,7 @@ import {
   petalAt,
   placeLetter,
   queenAllowanceFor,
+  queenPerimeterLandingHexKeys,
   trySubmitWord,
   tickWorld,
   worldToSnapshot,
@@ -210,10 +211,9 @@ describe('engine: queen allowance scales with hive size', () => {
       ...base,
       self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
     };
-    // Ring-1 storage is never `pickQueenLandingHex` (outer ring actives win),
-    // so if ticks wrongly retargeted to the auto hex, this landing would drift.
-    const inner = w.opponent.tiles.find((t) => t.state === 'storage')!;
-    const r0 = dispatchQueen(w, 'self', inner.hex);
+    const ring = queenPerimeterLandingHexKeys(w.opponent);
+    const outer = w.opponent.tiles.find((t) => ring.has(hexKey(t.hex)))!;
+    const r0 = dispatchQueen(w, 'self', outer.hex);
     expect(r0.ok).toBe(true);
     if (!r0.ok) return;
     let cur = r0.world;
@@ -225,7 +225,20 @@ describe('engine: queen allowance scales with hive size', () => {
     const q1 = cur.self.bees.find((b) => b.id === q0.id);
     expect(q1?.state.kind).toBe('queen-flying');
     if (q1?.state.kind !== 'queen-flying') return;
-    expect(hexEquals(q1.state.landingHex, inner.hex)).toBe(true);
+    expect(hexEquals(q1.state.landingHex, outer.hex)).toBe(true);
+  });
+
+  test('queen spawn rejects inner ring (non-perimeter) targets', () => {
+    const base = buildInitialWorld(fixedRng());
+    const w: World = {
+      ...base,
+      self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
+    };
+    const inner = w.opponent.tiles.find((t) => t.state === 'storage')!;
+    expect(queenPerimeterLandingHexKeys(w.opponent).has(hexKey(inner.hex))).toBe(false);
+    const r = dispatchQueen(w, 'self', inner.hex);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('invalid queen target');
   });
 
   test('target on the enemy central hive is rejected', () => {

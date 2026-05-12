@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import {
   activeQueenCountFor,
   axialToPixel,
@@ -9,6 +9,7 @@ import {
   hexKey,
   isAdjacent,
   queenAllowanceFor,
+  queenPerimeterLandingHexKeys,
   tileHasDraftableLetter,
   type Hex,
   type Side,
@@ -27,6 +28,8 @@ import { HOLD_HINT_SECONDS, useHoldToDispatch } from '../useHoldToDispatch.js';
 
 interface Props {
   side: Side;
+  /** Rendered under the hive title (e.g. honey cap from {@link PlayerPanel}). */
+  honeyLabel?: ReactNode;
 }
 
 const HEX_SIZE = 30;
@@ -56,9 +59,8 @@ const holdBorderPath = (size: number): string => {
 
 type DragMode = 'word-draft' | 'letter-move' | null;
 
-export const HiveGrid = ({ side }: Props) => {
+export const HiveGrid = ({ side, honeyLabel }: Props) => {
   const tiles = useGameStore((s) => s.world[side].tiles);
-  const playerId = useGameStore((s) => s.world[side].id);
   const drafts = useGameStore((s) => s.wordDrafts);
   const letterDrag = useGameStore((s) => (side === 'self' ? s.letterDrag : null));
   const dropHover = useGameStore((s) => (side === 'self' ? s.dropHover : null));
@@ -224,6 +226,14 @@ export const HiveGrid = ({ side }: Props) => {
     [floatingLetters],
   );
 
+  const queenRingKeys = useMemo(
+    () =>
+      queenTargeting && side === 'opponent'
+        ? queenPerimeterLandingHexKeys(player)
+        : null,
+    [queenTargeting, side, player.tiles],
+  );
+
   const allHexes = useMemo(() => positioned.map((t) => t.hex), [positioned]);
   const extent = useMemo(
     () => centeredViewBoxExtent(allHexes, HEX_SIZE),
@@ -249,14 +259,10 @@ export const HiveGrid = ({ side }: Props) => {
     h: Hex,
     tile: TileSnapshot,
   ) => {
-    // Queen targeting overrides everything — and is the one path that's also
-    // active on the opponent grid. Tapping the opponent's owned non-hive tile
-    // commits the queen's landing pick; tapping a non-targetable spot cancels.
+    // Queen targeting: only the defender's outer ring (tiles bordering
+    // unowned space) commits a landing; anything else cancels.
     if (queenTargeting && side === 'opponent') {
-      // Owned non-hive tiles are valid landing pads. Frontier hexes are
-      // synthesized client-side with `state === 'inactive'`, which the engine
-      // also rejects, so the same check handles both.
-      if (tile.state !== 'hive' && tile.state !== 'inactive') {
+      if (queenRingKeys?.has(hexKey(h))) {
         confirmQueenTarget(h);
       } else {
         cancelQueenTargeting();
@@ -387,26 +393,26 @@ export const HiveGrid = ({ side }: Props) => {
   const holdSeconds = HOLD_HINT_SECONDS;
 
   return (
-    <div className="grid-frame">
-      <h2 className="hud-title grid-heading">
-        {side === 'self' ? `HIVE ${playerId.toUpperCase()}` : `RIVAL ${playerId.toUpperCase()}`}
-      </h2>
+    <div className="grid-frame grid-frame--hive">
+      <h2 className="hud-title grid-heading">{side === 'self' ? 'YOUR HIVE' : 'RIVAL HIVE'}</h2>
+      {side === 'self' && honeyLabel}
       {side === 'self' && (
         <p className="grid-subtitle">
           hold a frontier tile {holdSeconds}s to build · {carpenterCost}🜨
         </p>
       )}
-      <svg
-        ref={svgRef}
-        className="hex-svg"
-        viewBox={viewBox}
-        preserveAspectRatio="xMidYMid meet"
-        role="img"
-        aria-label={`${side} hive grid`}
-        data-queen-targeting={queenTargeting && side === 'opponent' ? true : undefined}
-        style={{ touchAction: 'none', WebkitTouchCallout: 'none' }}
-        onContextMenu={(e) => e.preventDefault()}
-      >
+      <div className="hive-field-canvas">
+        <svg
+          ref={svgRef}
+          className="hex-svg"
+          viewBox={viewBox}
+          preserveAspectRatio="xMidYMid meet"
+          role="img"
+          aria-label={`${side} hive grid`}
+          data-queen-targeting={queenTargeting && side === 'opponent' ? true : undefined}
+          style={{ touchAction: 'none', WebkitTouchCallout: 'none' }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
         {positioned.map((t) => {
           const k = hexKey(t.hex);
           const draftIdx = draftIndexByKey.get(k);
@@ -435,13 +441,8 @@ export const HiveGrid = ({ side }: Props) => {
           // tile we peel rings off so the visible borders mirror the tile's
           // remaining HP tier (every 2 damage = one ring lost).
           const reuseLevel = Math.max(0, reuseCount - Math.floor((t.damage ?? 0) / 2));
-          // Owned non-hive opponent tiles light up as queen landing options
-          // while the player is in the targeting window.
           const isQueenTarget =
-            !!queenTargeting &&
-            side === 'opponent' &&
-            t.state !== 'hive' &&
-            t.state !== 'inactive';
+            queenRingKeys !== null && queenRingKeys.has(k);
           const interactiveTile =
             isQueenTarget ||
             (interactive &&
@@ -576,7 +577,8 @@ export const HiveGrid = ({ side }: Props) => {
             </g>
           );
         })}
-      </svg>
+        </svg>
+      </div>
     </div>
   );
 };

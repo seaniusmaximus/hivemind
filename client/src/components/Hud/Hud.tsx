@@ -32,7 +32,6 @@ export const Hud = () => {
   return (
     <header className="hud">
       <div className="hud-cluster">
-        <Stat label="HONEY" value={formatHoney(self.honey, selfCap)} accent="honey" />
         {mode === 'solo' ? (
           <button
             type="button"
@@ -56,10 +55,6 @@ export const Hud = () => {
 
       <div className="hud-center">
         <div className="hud-title">HIVEMIND</div>
-      </div>
-
-      <div className="hud-cluster hud-cluster-end">
-        <Stat label="RIVAL" value={formatHoney(opponent.honey, oppCap)} />
       </div>
     </header>
   );

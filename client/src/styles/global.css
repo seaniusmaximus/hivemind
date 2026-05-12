@@ -284,6 +284,10 @@ button.ghost {
   height: var(--hud-height);
 }
 
+.hud .hud-title {
+  font-size: 2rem;
+}
+
 .hud-cluster {
   display: flex;
   align-items: center;
@@ -630,7 +634,9 @@ button.ghost {
   display: grid;
   grid-template-columns: minmax(13rem, 1fr) minmax(0, 2.4fr) minmax(13rem, 1fr);
   gap: 1rem;
-  padding: 1rem;
+  /* Top inset comes from `.panel`; keep sides/bottom so headings line up with
+     flower + rival panels (single `.panel` padding stack). */
+  padding: 0 1rem 1rem;
 }
 
 .player-panel-side {
@@ -643,13 +649,25 @@ button.ghost {
 
 .player-panel-grid {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: center;
   min-width: 0;
   /* `min-height: 0` lets this grid cell shrink past its content's intrinsic
      height in column mode (mobile), so the SVG's `max-height: 100%` actually
      bites and we don't blow out the viewport. */
   min-height: 0;
+}
+
+.player-panel-honey-label {
+  margin: 5px 0;
+  font-family: 'Press Start 2P', system-ui, sans-serif;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  color: var(--honey);
+  text-shadow:
+    0 0 6px rgba(255, 196, 65, 0.55),
+    0 0 12px rgba(255, 196, 65, 0.25);
+  text-align: center;
 }
 
 /* ---- Controls panel ----------------------------------------------------- */
@@ -860,8 +878,8 @@ button.ghost {
 }
 
 .grid-heading {
-  margin: 0;
-  font-size: 0.8rem;
+  margin: 10px 0 0 0;
+  font-size: 1rem;
 }
 
 .grid-subtitle {
@@ -883,13 +901,23 @@ button.ghost {
   filter: drop-shadow(var(--grid-glow));
 }
 
-/* Flower field: consume vertical slack below the title block (flex canvas). */
-.grid-frame--flowers {
+/* Flower + hive panels: keep the title block at the top (same as flower field). */
+.grid-frame--flowers,
+.grid-frame--hive {
   justify-content: flex-start;
   gap: 0.35rem;
 }
 
 .flower-field-canvas {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hive-field-canvas {
   flex: 1;
   min-height: 0;
   width: 100%;
@@ -1202,25 +1230,26 @@ button.ghost {
 /* ---- Flower patches ----------------------------------------------------- */
 
 :root {
-  --flower-vowel: #ff5fa3;     /* hot pink — vowels are precious */
-  --flower-common: #2bf0ff;    /* cyan — workhorse consonants */
-  --flower-rare: #c084ff;      /* magenta-purple — wild swings */
+  /* Word-game palette: vowels blue, common consonants grey, uncommon green */
+  --flower-vowel: #4a9eff;
+  --flower-common: #9aa3b2;
+  --flower-rare: #38d974;
 }
 
 .flower-patch {
-  filter: drop-shadow(0 0 6px rgba(255, 95, 163, 0.18));
+  filter: drop-shadow(0 0 6px rgba(154, 163, 178, 0.14));
 }
 
 .flower-patch[data-type='vowel'] {
-  filter: drop-shadow(0 0 8px rgba(255, 95, 163, 0.35));
+  filter: drop-shadow(0 0 8px rgba(74, 158, 255, 0.38));
 }
 
 .flower-patch[data-type='common'] {
-  filter: drop-shadow(0 0 8px rgba(43, 240, 255, 0.35));
+  filter: drop-shadow(0 0 8px rgba(154, 163, 178, 0.32));
 }
 
 .flower-patch[data-type='rare'] {
-  filter: drop-shadow(0 0 8px rgba(192, 132, 255, 0.4));
+  filter: drop-shadow(0 0 8px rgba(56, 217, 116, 0.38));
 }
 
 /* The unused center hex of a patch — purely decorative anchor. */
@@ -1241,7 +1270,11 @@ button.ghost {
   font-size: 5px;
   text-anchor: middle;
   dominant-baseline: central;
-  fill: var(--text-dim);
+  fill: #ffffff;
+  paint-order: stroke fill;
+  stroke: rgba(11, 4, 32, 0.95);
+  stroke-width: 0.55px;
+  stroke-linejoin: round;
   pointer-events: none;
   letter-spacing: 0.05em;
 }
@@ -1257,17 +1290,17 @@ button.ghost {
 }
 
 .petal-tile[data-type='vowel'] {
-  fill: rgba(255, 95, 163, 0.18);
+  fill: rgba(74, 158, 255, 0.2);
   stroke: var(--flower-vowel);
 }
 
 .petal-tile[data-type='common'] {
-  fill: rgba(43, 240, 255, 0.16);
+  fill: rgba(154, 163, 178, 0.14);
   stroke: var(--flower-common);
 }
 
 .petal-tile[data-type='rare'] {
-  fill: rgba(192, 132, 255, 0.18);
+  fill: rgba(56, 217, 116, 0.16);
   stroke: var(--flower-rare);
 }
 
@@ -1277,7 +1310,11 @@ button.ghost {
 
 .petal-letter {
   font-size: 12px;
-  fill: var(--text);
+  fill: #ffffff;
+  paint-order: stroke fill;
+  stroke: rgba(11, 4, 32, 0.92);
+  stroke-width: 2.5px;
+  stroke-linejoin: round;
   pointer-events: none;
 }
 
@@ -1429,7 +1466,8 @@ button.ghost {
  * to a single column. The grid sits in the middle and shrinks to fit the
  * remaining height (`min(72vmin, ...) + max-height: 100%` on `.hex-svg`).
  * Mobile bumps `.hex-svg` vmin so hive + flower grids read larger on small screens.
- * The two sidebars become slim toolbars stacked above and below it.
+ * The two sidebars become slim toolbars: on narrow viewports the hive fills
+ * the middle, then controls sit above the rival mini at the bottom.
  * ------------------------------------------------------------------------ */
 
 @media (max-width: 720px) {
@@ -1474,6 +1512,10 @@ button.ghost {
     padding: 0.35rem 0.6rem;
   }
 
+  .hud .hud-title {
+    font-size: 1.5rem;
+  }
+
   .hud-cluster {
     gap: 0.5rem;
   }
@@ -1492,9 +1534,25 @@ button.ghost {
 
   .player-panel {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      'hive'
+      'controls'
+      'rival';
     gap: 0.4rem;
-    padding: 0.4rem;
+    padding: 0 0.4rem 0.4rem;
+  }
+
+  .player-panel-left {
+    grid-area: controls;
+  }
+
+  .player-panel-grid {
+    grid-area: hive;
+  }
+
+  .player-panel-right {
+    grid-area: rival;
   }
 
   .player-panel-side {
@@ -1554,9 +1612,6 @@ button.ghost {
   }
 
   /* --- grid frame trimming so the hex SVG keeps room --- */
-  .grid-heading {
-    font-size: 0.65rem;
-  }
 
   .grid-subtitle {
     font-size: 0.8rem;

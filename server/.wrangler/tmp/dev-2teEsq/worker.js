@@ -262,12 +262,30 @@ var cubeDistance = /* @__PURE__ */ __name((a, b) => {
   const bz = -b.q - b.r;
   return (Math.abs(a.q - b.q) + Math.abs(a.r - b.r) + Math.abs(az - bz)) / 2;
 }, "cubeDistance");
-var pickQueenLandingHex = /* @__PURE__ */ __name((defender) => defender.tiles.filter((t) => t.state !== "hive").sort((a, b) => {
-  const d = cubeDistance(b.hex, hex(0, 0)) - cubeDistance(a.hex, hex(0, 0));
-  if (d !== 0)
-    return d;
-  return hexKey(a.hex).localeCompare(hexKey(b.hex));
-})[0]?.hex ?? null, "pickQueenLandingHex");
+var queenPerimeterLandingHexKeys = /* @__PURE__ */ __name((defender) => {
+  const owned = new Set(defender.tiles.map((t) => hexKey(t.hex)));
+  const out = /* @__PURE__ */ new Set();
+  for (const t of defender.tiles) {
+    if (t.state === "hive" || t.state === "inactive")
+      continue;
+    if (neighbors(t.hex).some((n) => !owned.has(hexKey(n)))) {
+      out.add(hexKey(t.hex));
+    }
+  }
+  return out;
+}, "queenPerimeterLandingHexKeys");
+var pickQueenLandingHex = /* @__PURE__ */ __name((defender) => {
+  const ring = queenPerimeterLandingHexKeys(defender);
+  const candidates = defender.tiles.filter((t) => ring.has(hexKey(t.hex)));
+  if (candidates.length === 0)
+    return null;
+  return candidates.sort((a, b) => {
+    const d = cubeDistance(b.hex, hex(0, 0)) - cubeDistance(a.hex, hex(0, 0));
+    if (d !== 0)
+      return d;
+    return hexKey(a.hex).localeCompare(hexKey(b.hex));
+  })[0].hex;
+}, "pickQueenLandingHex");
 var isQueenLandingHex = /* @__PURE__ */ __name((defender, h) => defender.tiles.some((t) => hexEquals(t.hex, h) && t.state !== "hive" && t.state !== "inactive"), "isQueenLandingHex");
 var buildPlayer = /* @__PURE__ */ __name((id) => {
   const tiles = [];
@@ -1886,7 +1904,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-a0i4WC/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-B2qZOe/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -1918,7 +1936,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-a0i4WC/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-B2qZOe/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;

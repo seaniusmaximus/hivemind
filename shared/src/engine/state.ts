@@ -128,21 +128,41 @@ const cubeDistance = (a: Hex, b: Hex): number => {
   return (Math.abs(a.q - b.q) + Math.abs(a.r - b.r) + Math.abs(az - bz)) / 2;
 };
 
-/** Outermost owned non-hive hex on the defender — queen assault entry point. */
-const pickQueenLandingHex = (defender: PlayerState): Hex | null =>
-  defender.tiles
-    .filter((t) => t.state !== 'hive')
+/** Outermost owned landable ring: touches at least one hex outside the defender's blob. */
+export const queenPerimeterLandingHexKeys = (defender: PlayerState): Set<string> => {
+  const owned = new Set(defender.tiles.map((t) => hexKey(t.hex)));
+  const out = new Set<string>();
+  for (const t of defender.tiles) {
+    if (t.state === 'hive' || t.state === 'inactive') continue;
+    if (neighbors(t.hex).some((n) => !owned.has(hexKey(n)))) {
+      out.add(hexKey(t.hex));
+    }
+  }
+  return out;
+};
+
+/** Outermost owned non-hive hex on the defender — queen assault entry point (auto-pick). */
+const pickQueenLandingHex = (defender: PlayerState): Hex | null => {
+  const ring = queenPerimeterLandingHexKeys(defender);
+  const candidates = defender.tiles.filter((t) => ring.has(hexKey(t.hex)));
+  if (candidates.length === 0) return null;
+  return candidates
     .sort((a, b) => {
       const d = cubeDistance(b.hex, hex(0, 0)) - cubeDistance(a.hex, hex(0, 0));
       if (d !== 0) return d;
       return hexKey(a.hex).localeCompare(hexKey(b.hex));
-    })[0]?.hex ?? null;
+    })[0]!.hex;
+};
 
-/** Defender hex the queen may land on — must match {@link dispatchQueen} validation. */
+/** Defender hex the queen may land on — any owned non-hive tile (in-flight retarget checks). */
 const isQueenLandingHex = (defender: PlayerState, h: Hex): boolean =>
   defender.tiles.some(
     (t) => hexEquals(t.hex, h) && t.state !== 'hive' && t.state !== 'inactive',
   );
+
+/** Player-chosen spawn target: outer ring only (matches {@link pickQueenLandingHex} set). */
+const isQueenSpawnTargetHex = (defender: PlayerState, h: Hex): boolean =>
+  isQueenLandingHex(defender, h) && queenPerimeterLandingHexKeys(defender).has(hexKey(h));
 
 const buildPlayer = (id: string): PlayerState => {
   const tiles: TileSnapshot[] = [];
@@ -1329,10 +1349,10 @@ export const dispatchWorker = (world: World, side: Side, target: Hex): CommandRe
  * may have airborne at once is given by {@link queenAllowanceFor} (one plus
  * one for every {@link HEXES_PER_QUEEN_SLOT} owned hexes).
  *
- * `target` is the player-selected landing hex on the enemy hive. If omitted
- * (or null), the engine auto-picks the outermost owned non-hive tile via
- * {@link pickQueenLandingHex} — used by the 5-second targeting fallback and
- * by the older test fixtures.
+ * `target` is the player-selected landing hex on the enemy hive's **outer
+ * ring** (owned non-hive tiles bordering empty / unowned space). If omitted
+ * (or null), the engine auto-picks via {@link pickQueenLandingHex} — used by
+ * the targeting timeout and AI.
  */
 export const dispatchQueen = (
   world: World,
@@ -1348,7 +1368,7 @@ export const dispatchQueen = (
   const enemy = world[otherSide(side)];
   let landing: Hex | null;
   if (target !== undefined) {
-    if (!isQueenLandingHex(enemy, target)) {
+    if (!isQueenSpawnTargetHex(enemy, target)) {
       return { ok: false, world, reason: 'invalid queen target' };
     }
     landing = target;
