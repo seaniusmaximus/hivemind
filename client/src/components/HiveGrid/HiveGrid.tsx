@@ -1,15 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   activeQueenCountFor,
   axialToPixel,
   BEE_STATS,
+  QUEEN_MIN_OWNED_HEXES,
   frontierFor,
   hexEquals,
   hexHpForTile,
   hexKey,
   isAdjacent,
   queenAllowanceFor,
-  queenPerimeterLandingHexKeys,
   tileHasDraftableLetter,
   type Hex,
   type Side,
@@ -35,6 +42,11 @@ interface Props {
 const HEX_SIZE = 30;
 const REUSE_RING_STEP = 4;
 const MIN_RING_SIZE = 8;
+
+/** Visual scale: 1 = default; >1 zooms in without narrowing the viewBox (no crop). */
+const ZOOM_MIN = 0.35;
+const ZOOM_MAX = 2.75;
+const WHEEL_ZOOM_SENS = 0.0014;
 
 /** Hex path starting at the upper-right vertex (used for tile fills). */
 const hexPath = (size: number): string => {
@@ -74,7 +86,6 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
   const dispatchCarpenter = useGameStore((s) => s.dispatchCarpenter);
   const dispatchWorker = useGameStore((s) => s.dispatchWorker);
   const dispatchQueen = useGameStore((s) => s.dispatchQueen);
-  const confirmQueenTarget = useGameStore((s) => s.confirmQueenTarget);
   const cancelQueenTargeting = useGameStore((s) => s.cancelQueenTargeting);
   const queenTargeting = useGameStore((s) => s.queenTargeting);
   const pushToast = useGameStore((s) => s.pushToast);
@@ -131,6 +142,10 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
   /** Uncapped comb letter: pointerdown sets anchor; first `pointerenter` elsewhere picks letter-move vs word-draft. */
   const pendingLetterAnchorRef = useRef<Hex | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  zoomRef.current = zoom;
 
   // End any in-progress drag on pointer up anywhere in the document.
   useEffect(() => {
@@ -209,6 +224,9 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
     for (const bee of player.bees) {
       if (bee.state.kind === 'carpenter-flying') {
         set.add(hexKey(bee.state.target));
+        for (const qh of bee.state.queue) {
+          set.add(hexKey(qh));
+        }
       }
     }
     return set;
@@ -219,20 +237,28 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
   const queensActive = activeQueenCountFor(player);
   const queenAllowance = queenAllowanceFor(player);
   const queensFull = queensActive >= queenAllowance;
+  const hiveLargeEnoughForQueen = player.tiles.length >= QUEEN_MIN_OWNED_HEXES;
   const canSpawnQueen =
-    side === 'self' && honey >= queenCost && !queensFull;
+    side === 'self' &&
+    honey >= queenCost &&
+    !queensFull &&
+    hiveLargeEnoughForQueen;
   const floatingByHex = useMemo(
     () => new Map(floatingLetters.map((f) => [hexKey(f.hex), f])),
     [floatingLetters],
   );
 
-  const queenRingKeys = useMemo(
-    () =>
-      queenTargeting && side === 'opponent'
-        ? queenPerimeterLandingHexKeys(player)
-        : null,
-    [queenTargeting, side, player.tiles],
-  );
+  /** Defender tiles where an enemy queen is currently inbound (queen-flying). */
+  const attackerBees = useGameStore((s) => s.world[side === 'opponent' ? 'self' : 'opponent'].bees);
+  const incomingQueenHexKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const b of attackerBees) {
+      if (b.kind === 'queen' && b.state.kind === 'queen-flying') {
+        keys.add(hexKey(b.state.landingHex));
+      }
+    }
+    return keys;
+  }, [attackerBees]);
 
   const allHexes = useMemo(() => positioned.map((t) => t.hex), [positioned]);
   const extent = useMemo(
@@ -252,6 +278,63 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
     return () => unregisterGrid(panel);
   }, [side, extent.halfWidth, extent.halfHeight]);
 
+  // Wheel zoom (desktop / trackpad); non-passive so we can prevent page scroll.
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = Math.exp(-e.deltaY * WHEEL_ZOOM_SENS);
+      setZoom((z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z * factor)));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // Pinch zoom on touch devices.
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const pinch = { startDist: 0, startZoom: 1, active: false };
+    const dist = (e: TouchEvent) => {
+      if (e.touches.length < 2) return 0;
+      const a = e.touches[0]!;
+      const b = e.touches[1]!;
+      return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    };
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        const d = dist(e);
+        if (d > 0) {
+          pinch.startDist = d;
+          pinch.startZoom = zoomRef.current;
+          pinch.active = true;
+        }
+      }
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!pinch.active || e.touches.length < 2) return;
+      e.preventDefault();
+      const d = dist(e);
+      if (d <= 0 || pinch.startDist < 8) return;
+      const z = pinch.startZoom * (d / pinch.startDist);
+      setZoom(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z)));
+    };
+    const onEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) pinch.active = false;
+    };
+    el.addEventListener('touchstart', onStart, { passive: true });
+    el.addEventListener('touchmove', onMove, { passive: false });
+    el.addEventListener('touchend', onEnd);
+    el.addEventListener('touchcancel', onEnd);
+    return () => {
+      el.removeEventListener('touchstart', onStart);
+      el.removeEventListener('touchmove', onMove);
+      el.removeEventListener('touchend', onEnd);
+      el.removeEventListener('touchcancel', onEnd);
+    };
+  }, []);
+
   const interactive = side === 'self';
 
   const handlePointerDown = (
@@ -259,16 +342,6 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
     h: Hex,
     tile: TileSnapshot,
   ) => {
-    // Queen targeting: only the defender's outer ring (tiles bordering
-    // unowned space) commits a landing; anything else cancels.
-    if (queenTargeting && side === 'opponent') {
-      if (queenRingKeys?.has(hexKey(h))) {
-        confirmQueenTarget(h);
-      } else {
-        cancelQueenTargeting();
-      }
-      return;
-    }
     if (!interactive) return;
     // Touch devices implicitly capture the pointer to the originating element
     // on `pointerdown`, which retargets every subsequent pointer event back to
@@ -292,7 +365,16 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
         cancelQueenTargeting();
         return;
       }
-      // Click-the-crown: enter queen targeting at the cost of 20 honey.
+      // Click-the-crown: same queen flow as the spawn banner (mini-board side pick).
+      if (player.tiles.length < QUEEN_MIN_OWNED_HEXES) {
+        pushToast({
+          text: `queen unlocks at ${QUEEN_MIN_OWNED_HEXES} hive hexes (${player.tiles.length} now)`,
+          panel: 'self-hive',
+          hex: h,
+          variant: 'error',
+        });
+        return;
+      }
       if (honeyRef.current < queenCost) {
         pushToast({ text: 'not enough honey', panel: 'self-hive', hex: h, variant: 'error' });
         return;
@@ -401,16 +483,21 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
           hold a frontier tile {holdSeconds}s to build · {carpenterCost}🜨
         </p>
       )}
-      <div className="hive-field-canvas">
+      <div ref={canvasRef} className="hive-field-canvas hive-field-canvas--zoomable">
         <svg
           ref={svgRef}
-          className="hex-svg"
+          className="hex-svg hex-svg--hive"
           viewBox={viewBox}
           preserveAspectRatio="xMidYMid meet"
           role="img"
           aria-label={`${side} hive grid`}
-          data-queen-targeting={queenTargeting && side === 'opponent' ? true : undefined}
-          style={{ touchAction: 'none', WebkitTouchCallout: 'none' }}
+          style={{
+            touchAction: 'none',
+            WebkitTouchCallout: 'none',
+            transform: `scale(${zoom})`,
+            transformOrigin: 'center center',
+            overflow: 'visible',
+          }}
           onContextMenu={(e) => e.preventDefault()}
         >
         {positioned.map((t) => {
@@ -441,18 +528,15 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
           // tile we peel rings off so the visible borders mirror the tile's
           // remaining HP tier (every 2 damage = one ring lost).
           const reuseLevel = Math.max(0, reuseCount - Math.floor((t.damage ?? 0) / 2));
-          const isQueenTarget =
-            queenRingKeys !== null && queenRingKeys.has(k);
           const interactiveTile =
-            isQueenTarget ||
-            (interactive &&
-              ((t.state === 'storage' && !!t.letter) ||
-                (t.state === 'active' && !!t.letter) ||
-                t.state === 'letter' ||
-                t.state === 'capped' ||
-                isDropTarget ||
-                isCarpenterEligible ||
-                (t.state === 'hive' && canSpawnQueen)));
+            interactive &&
+            ((t.state === 'storage' && !!t.letter) ||
+              (t.state === 'active' && !!t.letter) ||
+              t.state === 'letter' ||
+              t.state === 'capped' ||
+              isDropTarget ||
+              isCarpenterEligible ||
+              (t.state === 'hive' && canSpawnQueen));
           const tileSize =
             t.state === 'hive'
               ? HEX_SIZE * HIVE_HEX_DRAW_SCALE
@@ -479,9 +563,9 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
                 data-drop-target={isDropTarget}
                 data-drop-hover={isDropHover}
                 data-interactive={interactiveTile}
-                data-queen-target={isQueenTarget || undefined}
                 data-reuse-level={reuseLevel}
                 data-hp={hp}
+                data-incoming-queen-landing={incomingQueenHexKeys.has(k) ? true : undefined}
                 onPointerDown={(e) => handlePointerDown(e, t.hex, t)}
                 onPointerEnter={() => handlePointerEnter(t.hex, t)}
                 onPointerLeave={() => handlePointerLeave(t.hex)}

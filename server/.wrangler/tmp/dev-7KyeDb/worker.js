@@ -86,6 +86,11 @@ var range = /* @__PURE__ */ __name((center, radius) => {
   }
   return result;
 }, "range");
+var axialToPixel = /* @__PURE__ */ __name((h, size) => {
+  const x = size * Math.sqrt(3) * (h.q + h.r / 2);
+  const y = size * (3 / 2) * h.r;
+  return { x, y };
+}, "axialToPixel");
 var isAdjacent = /* @__PURE__ */ __name((a, b) => distance(a, b) === 1, "isAdjacent");
 var isValidPath = /* @__PURE__ */ __name((path) => {
   if (path.length === 0)
@@ -182,8 +187,9 @@ var drawFlowerLetter = /* @__PURE__ */ __name((type, rng) => {
 
 // ../shared/dist/bees.js
 var BEE_STATS = {
-  // Workers and carpenters are now single-trip dispatches: each hold-to-send
-  // gesture spawns one bee that visits exactly one target and returns.
+  // Workers and paid carpenters: each hold spawns one bee that visits one
+  // target (carpenter capacity 1). Post-cap free expansion overrides capacity
+  // and uses `carpenter-flying.queue` for additional frontier hexes in order.
   worker: { capacity: 1, honeyCost: 3, flightSeconds: 1.5 },
   carpenter: { capacity: 1, honeyCost: 5, flightSeconds: 1.2 },
   // Drone caps are free — words pay you, they never charge you.
@@ -200,6 +206,7 @@ var HIVE = {
   hiveStorage: 5
 };
 var HEXES_PER_QUEEN_SLOT = 12;
+var QUEEN_MIN_OWNED_HEXES = 30;
 var FLIGHT_TIMES = {
   hiveToFlower: 1.5,
   flowerToHive: 1.5,
@@ -274,6 +281,30 @@ var queenPerimeterLandingHexKeys = /* @__PURE__ */ __name((defender) => {
   }
   return out;
 }, "queenPerimeterLandingHexKeys");
+var QUEEN_ATTACK_SIDE_HEX_SIZE = 30;
+var pickQueenLandingHexForSide = /* @__PURE__ */ __name((defender, attackSide, hexSize = QUEEN_ATTACK_SIDE_HEX_SIZE) => {
+  const ring = queenPerimeterLandingHexKeys(defender);
+  const perimeterHexes = defender.tiles.filter((t) => ring.has(hexKey(t.hex)) && t.state !== "hive" && t.state !== "inactive").map((t) => t.hex);
+  if (perimeterHexes.length === 0)
+    return null;
+  const origin = hex(0, 0);
+  const dir = attackSide === "top" ? { x: 0, y: -1 } : attackSide === "right" ? { x: 1, y: 0 } : attackSide === "bottom" ? { x: 0, y: 1 } : { x: -1, y: 0 };
+  const scored = perimeterHexes.map((h) => {
+    const { x, y } = axialToPixel(h, hexSize);
+    const dot = x * dir.x + y * dir.y;
+    const d = cubeDistance(h, origin);
+    return { h, dot, d };
+  });
+  const bestDot = Math.max(...scored.map((s) => s.dot));
+  const aligned = scored.filter((s) => s.dot >= bestDot - 1e-9);
+  aligned.sort((a, b) => {
+    const dd = b.d - a.d;
+    if (dd !== 0)
+      return dd;
+    return hexKey(a.h).localeCompare(hexKey(b.h));
+  });
+  return aligned[0].h;
+}, "pickQueenLandingHexForSide");
 var pickQueenLandingHex = /* @__PURE__ */ __name((defender) => {
   const ring = queenPerimeterLandingHexKeys(defender);
   const candidates = defender.tiles.filter((t) => ring.has(hexKey(t.hex)));
@@ -287,6 +318,7 @@ var pickQueenLandingHex = /* @__PURE__ */ __name((defender) => {
   })[0].hex;
 }, "pickQueenLandingHex");
 var isQueenLandingHex = /* @__PURE__ */ __name((defender, h) => defender.tiles.some((t) => hexEquals(t.hex, h) && t.state !== "hive" && t.state !== "inactive"), "isQueenLandingHex");
+var isQueenSpawnTargetHex = /* @__PURE__ */ __name((defender, h) => isQueenLandingHex(defender, h) && queenPerimeterLandingHexKeys(defender).has(hexKey(h)), "isQueenSpawnTargetHex");
 var buildPlayer = /* @__PURE__ */ __name((id) => {
   const tiles = [];
   for (const h of range(hex(0, 0), HIVE_RADIUS)) {
@@ -513,6 +545,14 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
   let updatedPatches = world.patches;
   let beesChanged = false;
   const remainingBees = [];
+  const reservedCarpenterTargets = /* @__PURE__ */ new Set();
+  for (const b of player.bees) {
+    if (b.state.kind === "carpenter-flying") {
+      reservedCarpenterTargets.add(hexKey(b.state.target));
+      for (const qh of b.state.queue)
+        reservedCarpenterTargets.add(hexKey(qh));
+    }
+  }
   for (const bee of player.bees) {
     const arrival = arrivalOf(bee);
     if (arrival === null || arrival > world.t) {
@@ -754,6 +794,12 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
         }
       }
       if (wordsLetters.length > 0) {
+        const newlyCappedHexes = [];
+        for (const h of allCappedHexes) {
+          const t0 = updatedPlayer.tiles.find((t) => hexEquals(t.hex, h));
+          if (t0 && t0.state !== "capped")
+            newlyCappedHexes.push(h);
+        }
         const bonus = wordsLetters.reduce((s, letters, i) => s + honeyForCappedWord(letters, crossesPriorCappedByWord[i] ?? false), 0);
         updatedPlayer = {
           ...updatedPlayer,
@@ -778,6 +824,43 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
           ownerId: player.id,
           text: `${summary} +${bonus} \u{1F728}${tag}`
         });
+        const ownedAfter = new Set(updatedPlayer.tiles.map((t) => hexKey(t.hex)));
+        const expansionTargets = /* @__PURE__ */ new Map();
+        for (const h of newlyCappedHexes) {
+          for (const n of neighbors(h)) {
+            const nk = hexKey(n);
+            if (ownedAfter.has(nk))
+              continue;
+            expansionTargets.set(nk, n);
+          }
+        }
+        const sortedExpansion = [...expansionTargets.values()].sort((a, b) => hexKey(a).localeCompare(hexKey(b)));
+        const expansionChain = [];
+        for (const target of sortedExpansion) {
+          const tk = hexKey(target);
+          if (reservedCarpenterTargets.has(tk))
+            continue;
+          if (!isCarpenterEligible(updatedPlayer, target))
+            continue;
+          reservedCarpenterTargets.add(tk);
+          expansionChain.push(target);
+        }
+        if (expansionChain.length > 0) {
+          const first = expansionChain[0];
+          const rest = expansionChain.slice(1);
+          remainingBees.push({
+            id: newId(),
+            kind: "carpenter",
+            ownerId: player.id,
+            capacity: expansionChain.length,
+            state: {
+              kind: "carpenter-flying",
+              queue: rest,
+              target: first,
+              flight: flight(sideHivePanel(side), hex(0, 0), sideHivePanel(side), first, next.t, FLIGHT_TIMES.hiveToTile)
+            }
+          });
+        }
       }
       beesChanged = true;
       continue;
@@ -829,6 +912,9 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
       const newCapacity = bee.capacity - 1;
       const [nextTarget, ...rest] = bee.state.queue;
       if (newCapacity > 0 && nextTarget) {
+        reservedCarpenterTargets.add(hexKey(nextTarget));
+        for (const qh of rest)
+          reservedCarpenterTargets.add(hexKey(qh));
         remainingBees.push({
           ...bee,
           capacity: newCapacity,
@@ -1121,18 +1207,30 @@ var dispatchWorker = /* @__PURE__ */ __name((world, side, target) => {
   };
   return { ok: true, world: setPlayer(world, side, updated) };
 }, "dispatchWorker");
-var dispatchQueen = /* @__PURE__ */ __name((world, side, target) => {
+var dispatchQueen = /* @__PURE__ */ __name((world, side, opts) => {
   const player = world[side];
   const cost = BEE_STATS.queen.honeyCost;
   if (player.honey < cost)
     return { ok: false, world, reason: "not enough honey" };
+  if (player.tiles.length < QUEEN_MIN_OWNED_HEXES) {
+    return { ok: false, world, reason: "queen min hive size" };
+  }
   if (activeQueenCountFor(player) >= queenAllowanceFor(player)) {
     return { ok: false, world, reason: "queen allowance reached" };
   }
   const enemy = world[otherSide(side)];
+  const { target, attackSide } = opts ?? {};
+  if (target !== void 0 && attackSide !== void 0) {
+    return { ok: false, world, reason: "queen attack overspecified" };
+  }
   let landing;
-  if (target !== void 0) {
-    if (!isQueenLandingHex(enemy, target)) {
+  if (attackSide !== void 0) {
+    landing = pickQueenLandingHexForSide(enemy, attackSide);
+    if (!landing || !isQueenSpawnTargetHex(enemy, landing)) {
+      return { ok: false, world, reason: "invalid queen attack side" };
+    }
+  } else if (target !== void 0) {
+    if (!isQueenSpawnTargetHex(enemy, target)) {
       return { ok: false, world, reason: "invalid queen target" };
     }
     landing = target;
@@ -1303,7 +1401,10 @@ var applyCommand = /* @__PURE__ */ __name((world, side, cmd) => {
     case "dispatchCarpenter":
       return dispatchCarpenter(world, side, cmd.target);
     case "dispatchQueen":
-      return dispatchQueen(world, side, cmd.target);
+      return dispatchQueen(world, side, {
+        ...cmd.target !== void 0 ? { target: cmd.target } : {},
+        ...cmd.attackSide !== void 0 ? { attackSide: cmd.attackSide } : {}
+      });
     case "placeLetter":
       return placeLetter(world, side, cmd.from, cmd.to);
     case "submitWords":
@@ -1904,7 +2005,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-B2qZOe/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-j2IQrj/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -1936,7 +2037,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-B2qZOe/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-j2IQrj/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;

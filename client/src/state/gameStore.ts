@@ -3,7 +3,9 @@ import {
   activeQueenCountFor,
   applyCommand as engineApplyCommand,
   BEE_STATS,
+  QUEEN_MIN_OWNED_HEXES,
   buildInitialWorld,
+  frontierFor,
   hexEquals,
   hexKey,
   isAdjacent,
@@ -19,6 +21,7 @@ import {
   type Hex,
   type Letter,
   type PlayerSummary,
+  type QueenAttackSide,
   type ServerMessage,
   type Side,
   type TileSnapshot,
@@ -34,6 +37,23 @@ import {
   type ConnectionStatus,
   type NetConnection,
 } from '../game/net/connection.js';
+
+const padTilesForQueenMin = (player: World['self']): World['self'] => {
+  let next = player;
+  while (next.tiles.length < QUEEN_MIN_OWNED_HEXES) {
+    const f = frontierFor(next);
+    const h = f[0];
+    if (!h) return next;
+    next = {
+      ...next,
+      tiles: [
+        ...next.tiles,
+        { hex: h, state: 'active' as const, letter: null, reuseCount: 0, damage: 0 },
+      ],
+    };
+  }
+  return next;
+};
 
 export type PanelIndex = 0 | 1 | 2;
 
@@ -129,10 +149,10 @@ interface GameStore {
    *  overflow is dropped from the head so spam doesn't leak. */
   toasts: readonly Toast[];
   /**
-   * Queen targeting mode. After {@link dispatchQueen} is called we enter a
-   * brief window during which the player picks the queen's landing hex on
-   * the opponent grid. After {@link QUEEN_TARGETING_MS} elapses without a
-   * pick we auto-fire the queen using {@link pickQueenLandingHex}.
+   * Queen targeting mode. After {@link dispatchQueen} is called the player
+   * chooses an {@link QueenAttackSide} on the expanded rival mini-board. After
+   * {@link QUEEN_TARGETING_MS} elapses without a pick the queen auto-fires via
+   * {@link pickQueenLandingHex}.
    */
   queenTargeting: { readonly startedAt: number; readonly deadline: number } | null;
 
@@ -160,13 +180,13 @@ interface GameStore {
   dispatchCarpenter: (h: Hex, side?: Side) => void;
   /**
    * Begin a queen dispatch. Honey/allowance preconditions are checked here so
-   * we don't enter targeting just to bounce off the engine 5 seconds later.
+   * we don't enter targeting just to bounce off the engine later.
    * On success this enters {@link queenTargeting}; the actual queen is sent
-   * via {@link confirmQueenTarget} (or auto-fired after the timer elapses).
+   * via {@link confirmQueenAttackSide} (or auto-fired after the timer elapses).
    */
   dispatchQueen: (side?: Side) => void;
-  /** Confirm the player's queen landing pick on the opponent grid. */
-  confirmQueenTarget: (target: Hex) => void;
+  /** Confirm the queen assault direction on the rival hive (outermost hex on that side). */
+  confirmQueenAttackSide: (side: QueenAttackSide) => void;
   /** Abort an in-progress queen targeting (e.g. user clicked the spawn button again). */
   cancelQueenTargeting: () => void;
   /** Clear the most recent dispatch error (e.g. when the user tries again). */
@@ -336,10 +356,10 @@ export const useGameStore = create<GameStore>((set, get) => {
     set((s) => {
       const w = s.world;
       if (side === 'self') {
-        const self = w.self;
+        const self = padTilesForQueenMin(w.self);
         return { world: { ...w, self: { ...self, honey: Math.max(self.honey, cost) } } };
       }
-      const opp = w.opponent;
+      const opp = padTilesForQueenMin(w.opponent);
       return { world: { ...w, opponent: { ...opp, honey: Math.max(opp.honey, cost) } } };
     });
     const r = get().applyCommand({ kind: 'dispatchQueen' }, side);
@@ -455,6 +475,15 @@ export const useGameStore = create<GameStore>((set, get) => {
       s.pushToast({ text: 'not enough honey', panel: 'self-hive', hex: { q: 0, r: 0 }, variant: 'error' });
       return;
     }
+    if (player.tiles.length < QUEEN_MIN_OWNED_HEXES) {
+      s.pushToast({
+        text: `queen unlocks at ${QUEEN_MIN_OWNED_HEXES} hive hexes (${player.tiles.length} now)`,
+        panel: 'self-hive',
+        hex: { q: 0, r: 0 },
+        variant: 'error',
+      });
+      return;
+    }
     if (activeQueenCountFor(player) >= queenAllowanceFor(player)) {
       s.pushToast({
         text: 'queen allowance reached',
@@ -473,8 +502,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     clearQueenTimer();
     const startedAt = performance.now();
     const deadline = startedAt + QUEEN_TARGETING_MS;
-    // Slide to opponent hive so the player can pick a landing hex without hunting for the panel.
-    set({ queenTargeting: { startedAt, deadline }, panel: 2 });
+    set({ queenTargeting: { startedAt, deadline } });
     queenTargetingTimer = setTimeout(() => {
       queenTargetingTimer = null;
       // If targeting was cancelled or already confirmed, do nothing.
@@ -492,17 +520,17 @@ export const useGameStore = create<GameStore>((set, get) => {
     }, QUEEN_TARGETING_MS);
   },
 
-  confirmQueenTarget: (target) => {
+  confirmQueenAttackSide: (attackSide) => {
     const s = get();
     if (!s.queenTargeting) return;
     clearQueenTimer();
     set({ queenTargeting: null });
-    const r = get().applyCommand({ kind: 'dispatchQueen', target }, 'self');
+    const r = get().applyCommand({ kind: 'dispatchQueen', attackSide }, 'self');
     if (!r.ok) {
       get().pushToast({
         text: r.reason,
-        panel: 'opponent-hive',
-        hex: target,
+        panel: 'self-hive',
+        hex: { q: 0, r: 0 },
         variant: 'error',
       });
     }

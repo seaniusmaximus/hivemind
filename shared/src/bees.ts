@@ -12,8 +12,9 @@ export interface BeeStats {
 }
 
 export const BEE_STATS: Readonly<Record<BeeKind, BeeStats>> = {
-  // Workers and carpenters are now single-trip dispatches: each hold-to-send
-  // gesture spawns one bee that visits exactly one target and returns.
+  // Workers and paid carpenters: each hold spawns one bee that visits one
+  // target (carpenter capacity 1). Post-cap free expansion overrides capacity
+  // and uses `carpenter-flying.queue` for additional frontier hexes in order.
   worker: { capacity: 1, honeyCost: 3, flightSeconds: 1.5 },
   carpenter: { capacity: 1, honeyCost: 5, flightSeconds: 1.2 },
   // Drone caps are free — words pay you, they never charge you.
@@ -58,6 +59,12 @@ export const HIVE = {
  * {@link HEXES_PER_QUEEN_SLOT} hexes they own. Big hives field swarms.
  */
 export const HEXES_PER_QUEEN_SLOT = 12;
+
+/**
+ * Minimum owned hive hexes before a player may dispatch a queen (early-game
+ * gate in addition to {@link BEE_STATS.queen.honeyCost}).
+ */
+export const QUEEN_MIN_OWNED_HEXES = 30;
 
 /** Per-segment flight times (seconds). */
 export const FLIGHT_TIMES = {

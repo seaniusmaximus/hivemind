@@ -9,6 +9,13 @@ import type { Bee } from './bees.js';
  *  themselves as `'self'` regardless of who they are in the room. */
 export type Side = 'self' | 'opponent';
 
+/**
+ * Cardinal approach for a queen assault, in the same pixel axes as
+ * {@link axialToPixel} (+x east, +y south). The engine picks the perimeter hex
+ * on that side that is furthest from the hive center.
+ */
+export type QueenAttackSide = 'top' | 'right' | 'bottom' | 'left';
+
 /** Engine-local lifecycle. Distinct from the lobby-aware {@link GamePhase}
  *  below — the engine only cares whether play is ongoing or finished. */
 export type WorldPhase = 'playing' | 'over';
@@ -35,7 +42,11 @@ export interface ActivityEntry {
 export type GameCommand =
   | { readonly kind: 'dispatchWorker'; readonly target: Hex }
   | { readonly kind: 'dispatchCarpenter'; readonly target: Hex }
-  | { readonly kind: 'dispatchQueen'; readonly target?: Hex }
+  | {
+      readonly kind: 'dispatchQueen';
+      readonly target?: Hex;
+      readonly attackSide?: QueenAttackSide;
+    }
   | { readonly kind: 'placeLetter'; readonly from: Hex; readonly to: Hex }
   | { readonly kind: 'submitWords'; readonly paths: readonly (readonly Hex[])[] };
 

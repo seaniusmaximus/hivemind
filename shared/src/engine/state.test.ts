@@ -1,5 +1,5 @@
-import { hex, hexEquals, hexKey } from '../hex.js';
-import { BEE_STATS, HEXES_PER_QUEEN_SLOT, HIVE } from '../bees.js';
+import { axialToPixel, hex, hexEquals, hexKey } from '../hex.js';
+import { BEE_STATS, HEXES_PER_QUEEN_SLOT, HIVE, QUEEN_MIN_OWNED_HEXES } from '../bees.js';
 import { makeRng } from '../letters.js';
 import type { Petal } from '../messages.js';
 import {
@@ -13,6 +13,7 @@ import {
   honeyCapFor,
   honeyRateFor,
   petalAt,
+  pickQueenLandingHexForSide,
   placeLetter,
   queenAllowanceFor,
   queenPerimeterLandingHexKeys,
@@ -35,6 +36,27 @@ const advance = (world: World, seconds: number, rng = fixedRng()): World => {
     elapsed += step;
   }
   return w;
+};
+
+/** Pad self with real frontier tiles until the queen size gate is satisfied. */
+const expandSelfToMinQueenTiles = (w: World): World => {
+  let next = w;
+  while (next.self.tiles.length < QUEEN_MIN_OWNED_HEXES) {
+    const f = frontierFor(next.self);
+    const h = f[0];
+    if (!h) throw new Error('expandSelfToMinQueenTiles: empty frontier');
+    next = {
+      ...next,
+      self: {
+        ...next.self,
+        tiles: [
+          ...next.self.tiles,
+          { hex: h, state: 'active' as const, letter: null, reuseCount: 0, damage: 0 },
+        ],
+      },
+    };
+  }
+  return next;
 };
 
 const firstPetal = (w: World): Petal & { patchId: string } => {
@@ -157,7 +179,7 @@ describe('engine: queen allowance scales with hive size', () => {
 
   test('dispatchQueen succeeds repeatedly until the allowance is reached', () => {
     const rng = fixedRng();
-    let w = buildInitialWorld(rng);
+    let w = expandSelfToMinQueenTiles(buildInitialWorld(rng));
     // Big stockpile + tile pool that generates a 3-queen allowance.
     const allowance = queenAllowanceFor(w.self);
     expect(allowance).toBeGreaterThanOrEqual(2);
@@ -185,15 +207,22 @@ describe('engine: queen allowance scales with hive size', () => {
     if (!r.ok) expect(r.reason).toBe('not enough honey');
   });
 
+  test('dispatchQueen rejects when hive is below QUEEN_MIN_OWNED_HEXES', () => {
+    const w = buildInitialWorld(fixedRng());
+    expect(w.self.tiles.length).toBeLessThan(QUEEN_MIN_OWNED_HEXES);
+    const rich: World = { ...w, self: { ...w.self, honey: 500 } };
+    const r = dispatchQueen(rich, 'self');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('queen min hive size');
+  });
+
   test('caller-supplied target lands the queen on that hex', () => {
     const rng = fixedRng();
     const base = buildInitialWorld(rng);
-    const w: World = {
-      ...base,
-      self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
-    };
+    let w = expandSelfToMinQueenTiles(base);
+    w = { ...w, self: { ...w.self, honey: BEE_STATS.queen.honeyCost + 1 } };
     const enemyActive = w.opponent.tiles.find((t) => t.state === 'active')!;
-    const r = dispatchQueen(w, 'self', enemyActive.hex);
+    const r = dispatchQueen(w, 'self', { target: enemyActive.hex });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const queen = r.world.self.bees[r.world.self.bees.length - 1]!;
@@ -207,13 +236,11 @@ describe('engine: queen allowance scales with hive size', () => {
   test('in-flight queen keeps chosen landing hex across engine ticks', () => {
     const rng = fixedRng();
     const base = buildInitialWorld(rng);
-    const w: World = {
-      ...base,
-      self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
-    };
+    let w = expandSelfToMinQueenTiles(base);
+    w = { ...w, self: { ...w.self, honey: BEE_STATS.queen.honeyCost + 1 } };
     const ring = queenPerimeterLandingHexKeys(w.opponent);
     const outer = w.opponent.tiles.find((t) => ring.has(hexKey(t.hex)))!;
-    const r0 = dispatchQueen(w, 'self', outer.hex);
+    const r0 = dispatchQueen(w, 'self', { target: outer.hex });
     expect(r0.ok).toBe(true);
     if (!r0.ok) return;
     let cur = r0.world;
@@ -230,38 +257,72 @@ describe('engine: queen allowance scales with hive size', () => {
 
   test('queen spawn rejects inner ring (non-perimeter) targets', () => {
     const base = buildInitialWorld(fixedRng());
-    const w: World = {
-      ...base,
-      self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
-    };
+    let w = expandSelfToMinQueenTiles(base);
+    w = { ...w, self: { ...w.self, honey: BEE_STATS.queen.honeyCost + 1 } };
     const inner = w.opponent.tiles.find((t) => t.state === 'storage')!;
     expect(queenPerimeterLandingHexKeys(w.opponent).has(hexKey(inner.hex))).toBe(false);
-    const r = dispatchQueen(w, 'self', inner.hex);
+    const r = dispatchQueen(w, 'self', { target: inner.hex });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('invalid queen target');
   });
 
   test('target on the enemy central hive is rejected', () => {
     const base = buildInitialWorld(fixedRng());
-    const w: World = {
-      ...base,
-      self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
-    };
+    let w = expandSelfToMinQueenTiles(base);
+    w = { ...w, self: { ...w.self, honey: BEE_STATS.queen.honeyCost + 1 } };
     const enemyHive = w.opponent.tiles.find((t) => t.state === 'hive')!;
-    const r = dispatchQueen(w, 'self', enemyHive.hex);
+    const r = dispatchQueen(w, 'self', { target: enemyHive.hex });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('invalid queen target');
   });
 
   test('target that the enemy does not own is rejected', () => {
     const base = buildInitialWorld(fixedRng());
-    const w: World = {
-      ...base,
-      self: { ...base.self, honey: BEE_STATS.queen.honeyCost + 1 },
-    };
-    const r = dispatchQueen(w, 'self', { q: 99, r: -99 });
+    let w = expandSelfToMinQueenTiles(base);
+    w = { ...w, self: { ...w.self, honey: BEE_STATS.queen.honeyCost + 1 } };
+    const r = dispatchQueen(w, 'self', { target: { q: 99, r: -99 } });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('invalid queen target');
+  });
+
+  test('pickQueenLandingHexForSide returns a perimeter hex aligned with that side', () => {
+    const w = buildInitialWorld(fixedRng());
+    const ring = queenPerimeterLandingHexKeys(w.opponent);
+    for (const side of ['top', 'right', 'bottom', 'left'] as const) {
+      const h = pickQueenLandingHexForSide(w.opponent, side);
+      expect(h).not.toBeNull();
+      expect(ring.has(hexKey(h!))).toBe(true);
+      const { x, y } = axialToPixel(h!, 30);
+      if (side === 'top') expect(y).toBeLessThan(0);
+      if (side === 'bottom') expect(y).toBeGreaterThan(0);
+      if (side === 'left') expect(x).toBeLessThan(0);
+      if (side === 'right') expect(x).toBeGreaterThan(0);
+    }
+  });
+
+  test('dispatchQueen with attackSide lands on pickQueenLandingHexForSide hex', () => {
+    const base = buildInitialWorld(fixedRng());
+    let w = expandSelfToMinQueenTiles(base);
+    w = { ...w, self: { ...w.self, honey: BEE_STATS.queen.honeyCost + 1 } };
+    const expected = pickQueenLandingHexForSide(w.opponent, 'left');
+    const r = dispatchQueen(w, 'self', { attackSide: 'left' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const queen = r.world.self.bees[r.world.self.bees.length - 1]!;
+    if (queen.state.kind !== 'queen-flying') throw new Error('expected queen-flying');
+    expect(hexEquals(queen.state.landingHex, expected!)).toBe(true);
+  });
+
+  test('dispatchQueen rejects both target and attackSide', () => {
+    const base = buildInitialWorld(fixedRng());
+    let w = expandSelfToMinQueenTiles(base);
+    w = { ...w, self: { ...w.self, honey: BEE_STATS.queen.honeyCost + 1 } };
+    const outer = w.opponent.tiles.find((t) =>
+      queenPerimeterLandingHexKeys(w.opponent).has(hexKey(t.hex)),
+    )!;
+    const r = dispatchQueen(w, 'self', { target: outer.hex, attackSide: 'top' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('queen attack overspecified');
   });
 });
 
@@ -562,6 +623,41 @@ describe('engine: drone caps a placed word', () => {
     // Opponent's resource pool is no longer tied to our caps. Their honey may
     // still drift via passive regen, but it never *drops*.
     expect(after.opponent.honey).toBeGreaterThanOrEqual(oppHoneyBefore);
+  });
+
+  test('capping schedules one free carpenter that chains frontier hexes (no honey cost)', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const path = [hex(0, -2), hex(1, -2), hex(2, -2)] as const;
+    w = {
+      ...w,
+      self: {
+        ...w.self,
+        honey: 8,
+        tiles: w.self.tiles.map((t) => {
+          if (hexEquals(t.hex, path[0])) return { ...t, state: 'letter', letter: 'C' };
+          if (hexEquals(t.hex, path[1])) return { ...t, state: 'letter', letter: 'A' };
+          if (hexEquals(t.hex, path[2])) return { ...t, state: 'letter', letter: 'T' };
+          return t;
+        }),
+      },
+    };
+    const submit = trySubmitWord(w, 'self', [path]);
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+    // Drone flight completes at t0 + 1.4s; cap resolves and schedules one carpenter.
+    const mid = advance(submit.world, 1.5, rng);
+    const carpenters = mid.self.bees.filter((b) => b.kind === 'carpenter');
+    expect(carpenters.length).toBe(1);
+    expect(carpenters.every((b) => b.state.kind === 'carpenter-flying')).toBe(true);
+    const chain = carpenters[0]!;
+    if (chain.state.kind === 'carpenter-flying') {
+      expect(chain.capacity).toBe(1 + chain.state.queue.length);
+    }
+    // Word payout applied; auto carpenters must not apply the 5-honey hold fee.
+    expect(mid.self.honey).toBeGreaterThan(12);
+    const after = advance(mid, 3.0, rng);
+    expect(after.self.tiles.length).toBeGreaterThan(submit.world.self.tiles.length);
   });
 });
 

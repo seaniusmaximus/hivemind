@@ -5,8 +5,11 @@
  * Hive layout: each player starts with a single `'hive'` tile at axial (0,0),
  * 6 `'storage'` slots at radius 1, and 12 `'active'` tiles at radius 2.
  * Carpenters expand the hive *outward indefinitely* — any hex adjacent to your
- * active/letter/capped tiles is a "frontier" hex that can be queued and
- * activated. The renderer derives the frontier on the fly via
+ * active/letter/capped tiles is a "frontier" hex that can be activated. A
+ * hold-to-send spends honey; capping a word with a drone also schedules one
+ * free carpenter that visits every adjacent unowned hex around the newly capped
+ * tiles in sequence (same animation as a manual hold, no honey). The renderer
+ * derives the frontier on the fly via
  * {@link frontierFor}; the engine only stores tiles you actually own.
  *
  * Flower field: at any time exactly {@link PATCH_TARGET_COUNT} flower patches
@@ -17,8 +20,10 @@
  * which point a fresh patch spawns elsewhere.
  *
  * Workers and carpenters are dispatched directly via a hold-to-send gesture
- * on a target hex (the UI enforces the hold duration). Each dispatch spawns
- * one single-trip bee — there is no queue. If the target is gone when the
+ * on a target hex (the UI enforces the hold duration). Each hold spawns one
+ * bee with a single paid job. Post-cap frontier expansion reuses the same bee
+ * type with a multi-hex queue and raised capacity so tiles activate one after
+ * another. If the target is gone when the
  * bee arrives (a withered petal, a collected petal, or a frontier hex that
  * is no longer adjacent to the hive) the bee logs a miss and returns home.
  *
@@ -32,6 +37,7 @@ import {
   FLIGHT_TIMES,
   HEXES_PER_QUEEN_SLOT,
   HIVE,
+  QUEEN_MIN_OWNED_HEXES,
   type Bee,
   type BeeFlight,
   type BeePanel,
@@ -45,6 +51,7 @@ import {
   type Letter,
 } from '../letters.js';
 import {
+  axialToPixel,
   hex,
   hexEquals,
   hexKey,
@@ -62,13 +69,14 @@ import type {
   GameCommand,
   Petal,
   PlayerState,
+  QueenAttackSide,
   Side,
   TileSnapshot,
   WorldPhase,
   WorldSnapshot,
 } from '../messages.js';
 
-export type { ActivityEntry, Side, WorldPhase } from '../messages.js';
+export type { ActivityEntry, QueenAttackSide, Side, WorldPhase } from '../messages.js';
 
 export interface World {
   readonly t: number;
@@ -139,6 +147,53 @@ export const queenPerimeterLandingHexKeys = (defender: PlayerState): Set<string>
     }
   }
   return out;
+};
+
+/** Pixel hex radius used to classify {@link QueenAttackSide} (match main hive SVG). */
+const QUEEN_ATTACK_SIDE_HEX_SIZE = 30;
+
+/**
+ * Among the defender's queen perimeter tiles, pick the landing hex on the given
+ * {@link QueenAttackSide}: tiles that best align with that cardinal (dot
+ * product in {@link axialToPixel} space), breaking ties by greatest cube
+ * distance from the hive center, then {@link hexKey} order.
+ */
+export const pickQueenLandingHexForSide = (
+  defender: PlayerState,
+  attackSide: QueenAttackSide,
+  hexSize = QUEEN_ATTACK_SIDE_HEX_SIZE,
+): Hex | null => {
+  const ring = queenPerimeterLandingHexKeys(defender);
+  const perimeterHexes = defender.tiles
+    .filter((t) => ring.has(hexKey(t.hex)) && t.state !== 'hive' && t.state !== 'inactive')
+    .map((t) => t.hex);
+  if (perimeterHexes.length === 0) return null;
+
+  const origin = hex(0, 0);
+  const dir =
+    attackSide === 'top'
+      ? { x: 0, y: -1 }
+      : attackSide === 'right'
+        ? { x: 1, y: 0 }
+        : attackSide === 'bottom'
+          ? { x: 0, y: 1 }
+          : { x: -1, y: 0 };
+
+  const scored = perimeterHexes.map((h) => {
+    const { x, y } = axialToPixel(h, hexSize);
+    const dot = x * dir.x + y * dir.y;
+    const d = cubeDistance(h, origin);
+    return { h, dot, d };
+  });
+
+  const bestDot = Math.max(...scored.map((s) => s.dot));
+  const aligned = scored.filter((s) => s.dot >= bestDot - 1e-9);
+  aligned.sort((a, b) => {
+    const dd = b.d - a.d;
+    if (dd !== 0) return dd;
+    return hexKey(a.h).localeCompare(hexKey(b.h));
+  });
+  return aligned[0]!.h;
 };
 
 /** Outermost owned non-hive hex on the defender — queen assault entry point (auto-pick). */
@@ -573,6 +628,14 @@ const resolveSideBees = (world: World, side: Side): World => {
   let updatedPatches = world.patches;
   let beesChanged = false;
   const remainingBees: Bee[] = [];
+  /** Hex keys already targeted by an in-flight carpenter (avoid duplicate flights). */
+  const reservedCarpenterTargets = new Set<string>();
+  for (const b of player.bees) {
+    if (b.state.kind === 'carpenter-flying') {
+      reservedCarpenterTargets.add(hexKey(b.state.target));
+      for (const qh of b.state.queue) reservedCarpenterTargets.add(hexKey(qh));
+    }
+  }
 
   for (const bee of player.bees) {
     const arrival = arrivalOf(bee);
@@ -896,6 +959,11 @@ const resolveSideBees = (world: World, side: Side): World => {
         }
       }
       if (wordsLetters.length > 0) {
+        const newlyCappedHexes: Hex[] = [];
+        for (const h of allCappedHexes) {
+          const t0 = updatedPlayer.tiles.find((t) => hexEquals(t.hex, h));
+          if (t0 && t0.state !== 'capped') newlyCappedHexes.push(h);
+        }
         const bonus = wordsLetters.reduce(
           (s, letters, i) =>
             s + honeyForCappedWord(letters, crossesPriorCappedByWord[i] ?? false),
@@ -923,6 +991,52 @@ const resolveSideBees = (world: World, side: Side): World => {
           ownerId: player.id,
           text: `${summary} +${bonus} 🜨${tag}`,
         });
+        // Auto-expand the frontier: one free carpenter visits every adjacent
+        // unowned hex around the newly capped tiles in a fixed order (same
+        // animation as a manual hold, no honey cost).
+        const ownedAfter = new Set(updatedPlayer.tiles.map((t) => hexKey(t.hex)));
+        const expansionTargets = new Map<string, Hex>();
+        for (const h of newlyCappedHexes) {
+          for (const n of neighbors(h)) {
+            const nk = hexKey(n);
+            if (ownedAfter.has(nk)) continue;
+            expansionTargets.set(nk, n);
+          }
+        }
+        const sortedExpansion = [...expansionTargets.values()].sort((a, b) =>
+          hexKey(a).localeCompare(hexKey(b)),
+        );
+        const expansionChain: Hex[] = [];
+        for (const target of sortedExpansion) {
+          const tk = hexKey(target);
+          if (reservedCarpenterTargets.has(tk)) continue;
+          if (!isCarpenterEligible(updatedPlayer, target)) continue;
+          reservedCarpenterTargets.add(tk);
+          expansionChain.push(target);
+        }
+        if (expansionChain.length > 0) {
+          const first = expansionChain[0]!;
+          const rest = expansionChain.slice(1);
+          remainingBees.push({
+            id: newId(),
+            kind: 'carpenter',
+            ownerId: player.id,
+            capacity: expansionChain.length,
+            state: {
+              kind: 'carpenter-flying',
+              queue: rest,
+              target: first,
+              flight: flight(
+                sideHivePanel(side),
+                hex(0, 0),
+                sideHivePanel(side),
+                first,
+                next.t,
+                FLIGHT_TIMES.hiveToTile,
+              ),
+            },
+          });
+        }
       }
       beesChanged = true;
       continue;
@@ -986,6 +1100,8 @@ const resolveSideBees = (world: World, side: Side): World => {
       const newCapacity = bee.capacity - 1;
       const [nextTarget, ...rest] = bee.state.queue;
       if (newCapacity > 0 && nextTarget) {
+        reservedCarpenterTargets.add(hexKey(nextTarget));
+        for (const qh of rest) reservedCarpenterTargets.add(hexKey(qh));
         remainingBees.push({
           ...bee,
           capacity: newCapacity,
@@ -1345,29 +1461,42 @@ export const dispatchWorker = (world: World, side: Side, target: Hex): CommandRe
 /**
  * Spawn a queen that flies from the player's hive across to the opponent's
  * outer ring, then autonomously chews her way inward toward the central hive
- * tile. Costs {@link BEE_STATS.queen.honeyCost}; the number of queens a side
+ * tile. Costs {@link BEE_STATS.queen.honeyCost} and requires at least
+ * {@link QUEEN_MIN_OWNED_HEXES} owned hive hexes; the number of queens a side
  * may have airborne at once is given by {@link queenAllowanceFor} (one plus
  * one for every {@link HEXES_PER_QUEEN_SLOT} owned hexes).
  *
- * `target` is the player-selected landing hex on the enemy hive's **outer
- * ring** (owned non-hive tiles bordering empty / unowned space). If omitted
- * (or null), the engine auto-picks via {@link pickQueenLandingHex} — used by
- * the targeting timeout and AI.
+ * Supply at most one of:
+ * - `target`: explicit outer-ring hex (legacy / tests),
+ * - `attackSide`: engine picks {@link pickQueenLandingHexForSide},
+ * - neither: auto {@link pickQueenLandingHex}.
  */
 export const dispatchQueen = (
   world: World,
   side: Side,
-  target?: Hex,
+  opts?: { readonly target?: Hex; readonly attackSide?: QueenAttackSide },
 ): CommandResult => {
   const player = world[side];
   const cost = BEE_STATS.queen.honeyCost;
   if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
+  if (player.tiles.length < QUEEN_MIN_OWNED_HEXES) {
+    return { ok: false, world, reason: 'queen min hive size' };
+  }
   if (activeQueenCountFor(player) >= queenAllowanceFor(player)) {
     return { ok: false, world, reason: 'queen allowance reached' };
   }
   const enemy = world[otherSide(side)];
+  const { target, attackSide } = opts ?? {};
+  if (target !== undefined && attackSide !== undefined) {
+    return { ok: false, world, reason: 'queen attack overspecified' };
+  }
   let landing: Hex | null;
-  if (target !== undefined) {
+  if (attackSide !== undefined) {
+    landing = pickQueenLandingHexForSide(enemy, attackSide);
+    if (!landing || !isQueenSpawnTargetHex(enemy, landing)) {
+      return { ok: false, world, reason: 'invalid queen attack side' };
+    }
+  } else if (target !== undefined) {
     if (!isQueenSpawnTargetHex(enemy, target)) {
       return { ok: false, world, reason: 'invalid queen target' };
     }
@@ -1539,8 +1668,9 @@ const isCarpenterEligible = (player: PlayerState, h: Hex): boolean => {
 
 /**
  * Hold-to-send: spawn a single-trip carpenter bee that flies to one frontier
- * (or legacy `inactive`) hex and activates it. No queue — every dispatch
- * costs `carpenter.honeyCost`.
+ * (or legacy `inactive`) hex and activates it. Every dispatch costs
+ * `carpenter.honeyCost` (post-cap auto expansion uses a separate code path with
+ * a multi-hex queue and no honey charge).
  */
 export const dispatchCarpenter = (
   world: World,
@@ -1601,7 +1731,10 @@ export const applyCommand = (
     case 'dispatchCarpenter':
       return dispatchCarpenter(world, side, cmd.target);
     case 'dispatchQueen':
-      return dispatchQueen(world, side, cmd.target);
+      return dispatchQueen(world, side, {
+        ...(cmd.target !== undefined ? { target: cmd.target } : {}),
+        ...(cmd.attackSide !== undefined ? { attackSide: cmd.attackSide } : {}),
+      });
     case 'placeLetter':
       return placeLetter(world, side, cmd.from, cmd.to);
     case 'submitWords':

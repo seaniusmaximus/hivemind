@@ -15,6 +15,26 @@
   --hex-hive: #ffb014;
   --grid-glow: 0 0 8px rgba(255, 43, 214, 0.55), 0 0 24px rgba(43, 240, 255, 0.25);
   --hud-height: 4.4rem;
+
+  /**
+   * Global stacking (low → high). Game grids stay low; CRT film above the
+   * deck but under chrome; bees/toasts above chrome; modals last.
+   */
+  --z-panel-deck: 30;
+  --z-crt-vignette: 32;
+  --z-scanlines: 34;
+  --z-panel-chrome: 50;
+  --z-panel-arrow: 52;
+  --z-hud: 55;
+  --z-player-side-chrome: 48;
+  --z-player-grid: 1;
+  --z-bee-overlay: 120;
+  --z-toasts: 130;
+  --z-drag-ghost: 140;
+  --z-debug-hud: 115;
+  --z-game-over: 200;
+  --z-lobby: 250;
+  --z-queen-side-modal: 280;
 }
 
 * {
@@ -76,7 +96,7 @@ h3,
     rgba(0, 0, 0, 0) 4px
   );
   mix-blend-mode: multiply;
-  z-index: 100;
+  z-index: var(--z-scanlines);
 }
 
 .crt::before {
@@ -85,7 +105,7 @@ h3,
   inset: 0;
   pointer-events: none;
   background: radial-gradient(circle at center, transparent 60%, rgba(0, 0, 0, 0.45) 100%);
-  z-index: 99;
+  z-index: var(--z-crt-vignette);
 }
 
 button {
@@ -132,6 +152,7 @@ button.ghost {
   display: flex;
   overflow: hidden;
   position: relative;
+  z-index: var(--z-panel-deck);
   /* Reserve horizontal touch gestures for our swipe handler. Without this,
      mobile browsers claim horizontal pans for native scroll/back-navigation
      and fire `pointercancel` mid-swipe, so `pointerup` never reaches React.
@@ -155,6 +176,8 @@ button.ghost {
   justify-content: center;
   gap: 0.5rem;
   padding: 0.5rem 0;
+  position: relative;
+  z-index: var(--z-panel-chrome);
 }
 
 .panel-tab {
@@ -187,7 +210,7 @@ button.ghost {
 .panel-arrow {
   position: absolute;
   top: calc(50% - 1.5rem);
-  z-index: 4;
+  z-index: var(--z-panel-arrow);
   width: 2rem;
   height: 3rem;
   padding: 0;
@@ -282,6 +305,8 @@ button.ghost {
   background: rgba(0, 0, 0, 0.4);
   border-bottom: 1px solid rgba(255, 43, 214, 0.3);
   height: var(--hud-height);
+  position: relative;
+  z-index: var(--z-hud);
 }
 
 .hud .hud-title {
@@ -354,7 +379,7 @@ button.ghost {
   position: fixed;
   bottom: 0.75rem;
   left: 0.75rem;
-  z-index: 96;
+  z-index: var(--z-debug-hud);
   max-width: min(94vw, 22rem);
   padding: 0.55rem 0.65rem 0.45rem;
   background: rgba(8, 4, 28, 0.94);
@@ -443,40 +468,6 @@ button.ghost {
   cursor: pointer;
 }
 
-/* Queen targeting: turn the opponent grid's cursor into a target reticule and
- * pulse the eligible landing hexes so the player can see where the queen
- * could land. The crosshair cursor falls back gracefully on touch devices
- * (where there is no cursor) — the visual pulse carries the affordance. */
-.hex-svg[data-queen-targeting='true'],
-.hex-svg[data-queen-targeting='true'] .hex-tile {
-  cursor: crosshair;
-}
-
-.hex-tile[data-queen-target='true'] {
-  cursor: crosshair;
-  stroke: var(--neon-magenta, #ff2bd6);
-  stroke-width: 1.6;
-  filter: drop-shadow(0 0 3px var(--neon-magenta, #ff2bd6));
-  animation: queen-target-pulse 0.9s ease-in-out infinite alternate;
-}
-
-@keyframes queen-target-pulse {
-  from {
-    stroke-opacity: 0.55;
-    filter: drop-shadow(0 0 2px rgba(255, 43, 214, 0.55));
-  }
-  to {
-    stroke-opacity: 1;
-    filter: drop-shadow(0 0 6px rgba(255, 43, 214, 0.85));
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .hex-tile[data-queen-target='true'] {
-    animation: none;
-  }
-}
-
 /* ---- Queen spawn banner ------------------------------------------------- *
  *
  * The big gold call-to-action sitting between the panel tabs and the panel
@@ -488,6 +479,8 @@ button.ghost {
   display: flex;
   justify-content: center;
   padding: 0.4rem 0.75rem 0.5rem;
+  position: relative;
+  z-index: var(--z-panel-chrome);
 }
 
 .queen-spawn-button {
@@ -637,6 +630,7 @@ button.ghost {
   /* Top inset comes from `.panel`; keep sides/bottom so headings line up with
      flower + rival panels (single `.panel` padding stack). */
   padding: 0 1rem 1rem;
+  position: relative;
 }
 
 .player-panel-side {
@@ -645,6 +639,8 @@ button.ghost {
   justify-content: center;
   gap: 1rem;
   min-width: 0;
+  position: relative;
+  z-index: var(--z-player-side-chrome);
 }
 
 .player-panel-grid {
@@ -652,6 +648,9 @@ button.ghost {
   align-items: stretch;
   justify-content: center;
   min-width: 0;
+  overflow: visible;
+  position: relative;
+  z-index: var(--z-player-grid);
   /* `min-height: 0` lets this grid cell shrink past its content's intrinsic
      height in column mode (mobile), so the SVG's `max-height: 100%` actually
      bites and we don't blow out the viewport. */
@@ -739,7 +738,7 @@ button.ghost {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  z-index: 95;
+  z-index: var(--z-toasts);
 }
 
 .toast {
@@ -865,6 +864,140 @@ button.ghost {
   stroke: rgba(80, 50, 10, 0.45);
 }
 
+.rival-mini-hex--incoming-queen {
+  fill: rgba(110, 14, 32, 0.98);
+  stroke: #ff3d4a;
+  stroke-width: 0.28;
+  animation: rival-incoming-queen-pulse 0.95s ease-in-out infinite alternate;
+}
+
+/* Queen attack: expanded rival board + side picker (portal to body) */
+.rival-queen-expand-root {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-queen-side-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+}
+
+.rival-queen-expand-backdrop {
+  position: absolute;
+  inset: 0;
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: rgba(5, 2, 18, 0.72);
+  backdrop-filter: blur(3px);
+  cursor: pointer;
+}
+
+.rival-queen-expand-modal {
+  position: relative;
+  z-index: 1;
+  width: min(34rem, 94vw);
+  max-height: min(90vh, 38rem);
+  padding: 1rem 1.1rem 1.2rem;
+  background: rgba(11, 4, 32, 0.96);
+  border: 2px solid var(--neon-pink);
+  box-shadow:
+    0 0 28px rgba(255, 95, 163, 0.45),
+    0 0 60px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.65rem;
+}
+
+.rival-queen-expand-title {
+  margin: 0;
+  font-family: 'Press Start 2P', system-ui, sans-serif;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  color: var(--neon-pink);
+  text-align: center;
+  text-shadow: 0 0 8px rgba(255, 95, 163, 0.55);
+}
+
+.rival-queen-expand-hint {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text-dim);
+  text-align: center;
+  line-height: 1.25;
+}
+
+.rival-queen-expand-grid {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+  justify-items: center;
+  min-height: 0;
+}
+
+.rival-queen-expand-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+.rival-queen-expand-cell--mid {
+  flex-direction: row;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.rival-queen-expand-svg-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  max-height: min(52vh, 22rem);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rival-board-expand-svg {
+  width: 100%;
+  height: 100%;
+  max-height: min(52vh, 22rem);
+  display: block;
+  filter: drop-shadow(var(--grid-glow));
+}
+
+.rival-queen-side-btn {
+  font-family: 'Press Start 2P', system-ui, sans-serif;
+  font-size: 0.55rem;
+  letter-spacing: 0.08em;
+  padding: 0.55rem 0.85rem;
+  min-width: 5.5rem;
+  border: 2px solid var(--neon-cyan);
+  color: var(--neon-cyan);
+  background: rgba(43, 240, 255, 0.08);
+  cursor: pointer;
+  text-shadow: 0 0 6px rgba(43, 240, 255, 0.55);
+  box-shadow: 0 0 10px rgba(43, 240, 255, 0.25) inset;
+}
+
+.rival-queen-side-btn:hover,
+.rival-queen-side-btn:focus-visible {
+  background: rgba(43, 240, 255, 0.16);
+  outline: none;
+}
+
+.rival-queen-side-btn--compact {
+  min-width: 4.2rem;
+  padding: 0.45rem 0.5rem;
+}
+
+.rival-queen-expand-cancel {
+  align-self: center;
+  margin-top: 0.25rem;
+}
+
 /* ---- Grids -------------------------------------------------------------- */
 
 .grid-frame {
@@ -875,6 +1008,7 @@ button.ghost {
   width: 100%;
   height: 100%;
   justify-content: center;
+  position: relative;
 }
 
 .grid-heading {
@@ -908,6 +1042,21 @@ button.ghost {
   gap: 0.35rem;
 }
 
+/* Let scaled-up hive paint past the flex cell (see HiveGrid CSS transform). */
+.grid-frame--hive {
+  overflow: visible;
+}
+
+/* Headings / hints stay above a zoomed hex SVG inside the same column. */
+.grid-frame--hive .grid-heading,
+.grid-frame--hive .player-panel-honey-label,
+.grid-frame--hive .grid-subtitle,
+.grid-frame--flowers .grid-heading,
+.grid-frame--flowers .grid-subtitle {
+  position: relative;
+  z-index: 2;
+}
+
 .flower-field-canvas {
   flex: 1;
   min-height: 0;
@@ -926,9 +1075,22 @@ button.ghost {
   justify-content: center;
 }
 
+/* Wheel + pinch zoom; overflow visible so CSS scale on the SVG is not cropped. */
+.hive-field-canvas--zoomable {
+  touch-action: none;
+  overflow: visible;
+  position: relative;
+  z-index: 0;
+}
+
 .hex-svg.hex-svg--flowers {
   width: min(78vmin, 600px);
   height: min(78vmin, 600px);
+}
+
+/* Hive zoom uses CSS scale; keep strokes from clipping at the SVG edge. */
+.hex-svg.hex-svg--hive {
+  overflow: visible;
 }
 
 .hex-tile {
@@ -1026,6 +1188,63 @@ button.ghost {
   stroke-width: 2.5;
   stroke-dasharray: none;
   filter: drop-shadow(0 0 8px var(--neon-cyan));
+}
+
+.hex-tile[data-incoming-queen-landing='true'] {
+  transition: none;
+  fill: #6e0f22;
+  stroke: #ff1f36;
+  stroke-width: 2.6;
+  animation: hive-incoming-queen-pulse 0.95s ease-in-out infinite alternate;
+}
+
+@keyframes hive-incoming-queen-pulse {
+  from {
+    fill: #5a0c1c;
+    stroke: #ff1f36;
+    stroke-width: 2.2;
+    filter: drop-shadow(0 0 5px rgba(255, 45, 70, 0.55));
+  }
+
+  to {
+    fill: #ff6d7a;
+    stroke: #ffb3bc;
+    stroke-width: 3.4;
+    filter: drop-shadow(0 0 14px rgba(255, 45, 70, 0.9));
+  }
+}
+
+@keyframes rival-incoming-queen-pulse {
+  from {
+    fill: rgba(85, 10, 24, 0.99);
+    stroke: #ff1f36;
+    stroke-width: 0.22;
+    filter: drop-shadow(0 0 2px rgba(255, 45, 70, 0.65));
+  }
+
+  to {
+    fill: rgba(255, 125, 136, 0.98);
+    stroke: #ffb3bc;
+    stroke-width: 0.38;
+    filter: drop-shadow(0 0 6px rgba(255, 45, 70, 0.95));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hex-tile[data-incoming-queen-landing='true'],
+  .rival-mini-hex--incoming-queen {
+    animation: none;
+  }
+
+  .hex-tile[data-incoming-queen-landing='true'] {
+    fill: #8f1528;
+    stroke-width: 2.8;
+  }
+
+  .rival-mini-hex--incoming-queen {
+    fill: rgba(140, 28, 48, 0.98);
+    stroke-width: 0.3;
+  }
 }
 
 /* ---- Hold-to-dispatch progress border ----------------------------------- */
@@ -1206,7 +1425,7 @@ button.ghost {
 .drag-ghost {
   position: fixed;
   pointer-events: none;
-  z-index: 150;
+  z-index: var(--z-drag-ghost);
   font-family: 'Press Start 2P', system-ui, sans-serif;
   font-size: 1.2rem;
   color: var(--honey);
@@ -1326,7 +1545,7 @@ button.ghost {
   width: 100vw;
   height: 100vh;
   pointer-events: none;
-  z-index: 90;
+  z-index: var(--z-bee-overlay);
 }
 
 .bee {
@@ -1389,7 +1608,7 @@ button.ghost {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 200;
+  z-index: var(--z-game-over);
   backdrop-filter: blur(4px);
 }
 
@@ -1701,7 +1920,7 @@ button.ghost {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 250;
+  z-index: var(--z-lobby);
   backdrop-filter: blur(6px);
 }
 
