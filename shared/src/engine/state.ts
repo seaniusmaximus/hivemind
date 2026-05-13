@@ -27,9 +27,10 @@
  * bee arrives (a withered petal, a collected petal, or a frontier hex that
  * is no longer adjacent to the hive) the bee logs a miss and returns home.
  *
- * The dummy single-player AI lives in {@link tickSoloAi}; it is *not* called
- * by {@link tickWorld} so the server can drive an authoritative tick without
- * either side getting phantom AI commands. Solo callers compose them.
+ * The smart single-player AI lives in {@link tickSmartAi} (ai.ts); it is
+ * *not* called by {@link tickWorld} so the server can drive an authoritative
+ * tick without either side getting phantom AI commands. Solo callers compose
+ * them via {@link tickSolo}.
  */
 
 import {
@@ -62,6 +63,7 @@ import {
 } from '../hex.js';
 import { honeyForCappedWord, wordScore } from '../scoring.js';
 import { hexHpForTile, remainingHpForTile } from '../tileHp.js';
+import { tickSmartAi } from './ai.js';
 import type {
   ActivityEntry,
   FlowerPatch,
@@ -120,10 +122,10 @@ const FREED_LETTER_LIFETIME_SECONDS = 6;
 const LOG_MAX_ENTRIES = 14;
 const PATCH_TYPES: readonly FlowerType[] = ['vowel', 'common', 'rare'];
 
-const AI_WORKER_BASE = 6;
-const AI_PLACE_BASE = 5;
-const AI_PHANTOM_BASE = 14;
-const AI_CARPENTER_BASE = 20;
+const AI_WORKER_BASE = 2;
+const AI_PLACE_BASE = 1;
+const AI_PHANTOM_BASE = 4;
+const AI_CARPENTER_BASE = 8;
 
 // ---- Construction ----------------------------------------------------------
 
@@ -535,9 +537,9 @@ export const tickWorld = (
   return next;
 };
 
-/** Solo wrapper: sim + dummy opponent in one call. */
+/** Solo wrapper: sim + smart AI opponent in one call. */
 export const tickSolo = (world: World, dt: number, rng: () => number): World =>
-  tickSoloAi(tickWorld(world, dt, rng), dt, rng);
+  tickSmartAi(tickWorld(world, dt, rng), dt, rng);
 
 const tickFreedLetters = (world: World): World => {
   const trim = (letters: readonly FreedLetter[]) => letters.filter((l) => l.witherAt > world.t);

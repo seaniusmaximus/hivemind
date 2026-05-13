@@ -15,5 +15,8 @@
     "build": "tsc -b",
     "watch": "tsc -b -w",
     "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "wordlist-english": "^1.2.1"
   }
 }
