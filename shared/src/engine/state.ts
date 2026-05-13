@@ -61,7 +61,7 @@ import {
   type Hex,
 } from '../hex.js';
 import { honeyForCappedWord, wordScore } from '../scoring.js';
-import { hexHpForTile } from '../tileHp.js';
+import { hexHpForTile, remainingHpForTile } from '../tileHp.js';
 import type {
   ActivityEntry,
   FlowerPatch,
@@ -113,9 +113,9 @@ export const PATCH_MIN_CENTER_DISTANCE = 3;
 export const QUEEN_ASSAULT_DURATION_SECONDS = 5;
 export const QUEEN_LIFETIME_SECONDS = QUEEN_ASSAULT_DURATION_SECONDS;
 /** Seconds between queen strikes / steps during {@link BeeState} `queen-assault`. */
-export const QUEEN_ACTION_INTERVAL_SECONDS = 0.72;
+export const QUEEN_ACTION_INTERVAL_SECONDS = 0.5;
 /** Damage dealt to a hex per queen strike (during {@link BeeState} `queen-assault`). */
-export const QUEEN_DAMAGE_PER_STRIKE = 1;
+export const QUEEN_DAMAGE_PER_STRIKE = 0.5;
 const FREED_LETTER_LIFETIME_SECONDS = 6;
 const LOG_MAX_ENTRIES = 14;
 const PATCH_TYPES: readonly FlowerType[] = ['vowel', 'common', 'rare'];
@@ -154,9 +154,10 @@ const QUEEN_ATTACK_SIDE_HEX_SIZE = 30;
 
 /**
  * Among the defender's queen perimeter tiles, pick the landing hex on the given
- * {@link QueenAttackSide}: tiles that best align with that cardinal (dot
- * product in {@link axialToPixel} space), breaking ties by greatest cube
- * distance from the hive center, then {@link hexKey} order.
+ * {@link QueenAttackSide}: filter to tiles on that half of the hive (positive
+ * dot product with the side direction in pixel space), then pick the *weakest*
+ * point — closest to the hive center first, then lowest remaining HP, then
+ * {@link hexKey} order for stability.
  */
 export const pickQueenLandingHexForSide = (
   defender: PlayerState,
@@ -164,10 +165,10 @@ export const pickQueenLandingHexForSide = (
   hexSize = QUEEN_ATTACK_SIDE_HEX_SIZE,
 ): Hex | null => {
   const ring = queenPerimeterLandingHexKeys(defender);
-  const perimeterHexes = defender.tiles
-    .filter((t) => ring.has(hexKey(t.hex)) && t.state !== 'hive' && t.state !== 'inactive')
-    .map((t) => t.hex);
-  if (perimeterHexes.length === 0) return null;
+  const perimeterTiles = defender.tiles.filter(
+    (t) => ring.has(hexKey(t.hex)) && t.state !== 'hive' && t.state !== 'inactive',
+  );
+  if (perimeterTiles.length === 0) return null;
 
   const origin = hex(0, 0);
   const dir =
@@ -179,32 +180,41 @@ export const pickQueenLandingHexForSide = (
           ? { x: 0, y: 1 }
           : { x: -1, y: 0 };
 
-  const scored = perimeterHexes.map((h) => {
-    const { x, y } = axialToPixel(h, hexSize);
+  const scored = perimeterTiles.map((t) => {
+    const { x, y } = axialToPixel(t.hex, hexSize);
     const dot = x * dir.x + y * dir.y;
-    const d = cubeDistance(h, origin);
-    return { h, dot, d };
+    const d = cubeDistance(t.hex, origin);
+    const hp = remainingHpForTile(t);
+    return { t, dot, d, hp };
   });
 
-  const bestDot = Math.max(...scored.map((s) => s.dot));
-  const aligned = scored.filter((s) => s.dot >= bestDot - 1e-9);
-  aligned.sort((a, b) => {
-    const dd = b.d - a.d;
+  // Keep only tiles on the chosen side (positive dot product).
+  const onSide = scored.filter((s) => s.dot > 1e-9);
+  const pool = onSide.length > 0 ? onSide : scored;
+
+  // Weakest point: closest to center first, then lowest HP, then hexKey.
+  pool.sort((a, b) => {
+    const dd = a.d - b.d;
     if (dd !== 0) return dd;
-    return hexKey(a.h).localeCompare(hexKey(b.h));
+    const hpDiff = a.hp - b.hp;
+    if (hpDiff !== 0) return hpDiff;
+    return hexKey(a.t.hex).localeCompare(hexKey(b.t.hex));
   });
-  return aligned[0]!.h;
+  return pool[0]!.t.hex;
 };
 
-/** Outermost owned non-hive hex on the defender — queen assault entry point (auto-pick). */
+/** Weakest perimeter hex on the defender — closest to center, then lowest HP. */
 const pickQueenLandingHex = (defender: PlayerState): Hex | null => {
   const ring = queenPerimeterLandingHexKeys(defender);
   const candidates = defender.tiles.filter((t) => ring.has(hexKey(t.hex)));
   if (candidates.length === 0) return null;
   return candidates
     .sort((a, b) => {
-      const d = cubeDistance(b.hex, hex(0, 0)) - cubeDistance(a.hex, hex(0, 0));
-      if (d !== 0) return d;
+      const da = cubeDistance(a.hex, hex(0, 0));
+      const db = cubeDistance(b.hex, hex(0, 0));
+      if (da !== db) return da - db;
+      const hpDiff = remainingHpForTile(a) - remainingHpForTile(b);
+      if (hpDiff !== 0) return hpDiff;
       return hexKey(a.hex).localeCompare(hexKey(b.hex));
     })[0]!.hex;
 };

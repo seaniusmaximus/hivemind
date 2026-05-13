@@ -17,6 +17,7 @@ import {
   hexKey,
   isAdjacent,
   queenAllowanceFor,
+  remainingHpForTile,
   tileHasDraftableLetter,
   type Hex,
   type Side,
@@ -67,6 +68,53 @@ const holdBorderPath = (size: number): string => {
     points.push(`${(size * Math.cos(angle)).toFixed(2)},${(size * Math.sin(angle)).toFixed(2)}`);
   }
   return `M${points.join(' L')} Z`;
+};
+
+/**
+ * Deterministic hash (FNV-1a-ish) of a string to a 32-bit uint — used to seed
+ * per-hex crack patterns so each hex gets its own unique-looking fractures.
+ */
+const hashStr = (s: string): number => {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+};
+
+/** Generate deterministic crack-line SVG path data for a damaged hex.
+ *  `severity` 1–4+ controls how many cracks are drawn. */
+const crackPaths = (key: string, size: number, severity: number): string[] => {
+  const seed = hashStr(key);
+  const rng = (i: number) => {
+    let x = seed ^ (i * 2654435761);
+    x = Math.imul(x ^ (x >>> 16), 0x45d9f3b);
+    x = Math.imul(x ^ (x >>> 13), 0x45d9f3b);
+    return ((x ^ (x >>> 16)) >>> 0) / 0xffffffff;
+  };
+  const count = Math.min(severity, 5);
+  const paths: string[] = [];
+  for (let c = 0; c < count; c++) {
+    const angle = rng(c * 7) * Math.PI * 2;
+    const r0 = size * (0.12 + rng(c * 7 + 1) * 0.25);
+    const r1 = size * (0.55 + rng(c * 7 + 2) * 0.35);
+    const x0 = Math.cos(angle) * r0;
+    const y0 = Math.sin(angle) * r0;
+    const x1 = Math.cos(angle) * r1;
+    const y1 = Math.sin(angle) * r1;
+    const mx = (x0 + x1) / 2 + (rng(c * 7 + 3) - 0.5) * size * 0.28;
+    const my = (y0 + y1) / 2 + (rng(c * 7 + 4) - 0.5) * size * 0.28;
+    paths.push(`M${x0.toFixed(1)},${y0.toFixed(1)} L${mx.toFixed(1)},${my.toFixed(1)} L${x1.toFixed(1)},${y1.toFixed(1)}`);
+    if (severity > 2 && rng(c * 7 + 5) > 0.4) {
+      const bAngle = angle + (rng(c * 7 + 6) - 0.5) * 1.2;
+      const bLen = size * (0.2 + rng(c * 7 + 5) * 0.2);
+      const bx = mx + Math.cos(bAngle) * bLen;
+      const by = my + Math.sin(bAngle) * bLen;
+      paths.push(`M${mx.toFixed(1)},${my.toFixed(1)} L${bx.toFixed(1)},${by.toFixed(1)}`);
+    }
+  }
+  return paths;
 };
 
 type DragMode = 'word-draft' | 'letter-move' | null;
@@ -524,10 +572,13 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
           const hideLetter = draggingFromKey === k;
           const reuseCount = t.reuseCount ?? 0;
           const hp = hexHpForTile(t);
-          // Each capped reuse adds +2 HP and one ring. As the queen damages a
-          // tile we peel rings off so the visible borders mirror the tile's
-          // remaining HP tier (every 2 damage = one ring lost).
-          const reuseLevel = Math.max(0, reuseCount - Math.floor((t.damage ?? 0) / 2));
+          const damage = t.damage ?? 0;
+          const remaining = remainingHpForTile(t);
+          const isDamaged = damage > 0 && remaining > 0;
+          const crackSeverity = isDamaged ? Math.ceil(damage * 2) : 0;
+          // Each reuse adds 0.5 HP of armor (one ring). Queen strikes deal 1 HP,
+          // so each hit peels two rings. Rings peel from the outside in.
+          const reuseLevel = Math.max(0, reuseCount - Math.floor(damage * 2));
           const interactiveTile =
             interactive &&
             ((t.state === 'storage' && !!t.letter) ||
@@ -565,6 +616,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
                 data-interactive={interactiveTile}
                 data-reuse-level={reuseLevel}
                 data-hp={hp}
+                data-damaged={isDamaged ? true : undefined}
                 data-incoming-queen-landing={incomingQueenHexKeys.has(k) ? true : undefined}
                 onPointerDown={(e) => handlePointerDown(e, t.hex, t)}
                 onPointerEnter={() => handlePointerEnter(t.hex, t)}
@@ -583,6 +635,15 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
                     />
                   );
                 })}
+              {crackSeverity > 0 &&
+                crackPaths(k, tileSize, crackSeverity).map((cp, ci) => (
+                  <path
+                    key={`crack-${ci}`}
+                    d={cp}
+                    className="hex-crack"
+                    pointerEvents="none"
+                  />
+                ))}
               {t.state === 'hive' && (
                 <path
                   className="hive-door"

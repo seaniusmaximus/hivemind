@@ -1127,6 +1127,21 @@ button.ghost {
   pointer-events: none;
 }
 
+/* ---- Queen damage cracks ------------------------------------------------ */
+
+.hex-tile[data-damaged='true'] {
+  filter: drop-shadow(0 0 4px rgba(255, 60, 60, 0.35));
+}
+
+.hex-crack {
+  fill: none;
+  stroke: rgba(40, 0, 0, 0.72);
+  stroke-width: 1.1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 2px rgba(255, 80, 80, 0.5));
+}
+
 .hex-tile[data-state='hive'] {
   fill: var(--hex-hive);
   stroke: #fff2c4;

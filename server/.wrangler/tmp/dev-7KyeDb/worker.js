@@ -241,11 +241,14 @@ var honeyForCappedWord = /* @__PURE__ */ __name((word, crossesPriorCappedLetter)
 }, "honeyForCappedWord");
 
 // ../shared/dist/tileHp.js
-var HEX_HP_SCALE = 2;
 var hexHpForTile = /* @__PURE__ */ __name((tile) => {
-  const base = !tile.letter ? 1 : tile.state !== "capped" ? 2 : 4 + (tile.reuseCount ?? 0) * 2;
-  return base * HEX_HP_SCALE;
+  if (!tile.letter)
+    return 1;
+  if (tile.state !== "capped")
+    return 1.5;
+  return 2 + (tile.reuseCount ?? 0) * 0.5;
 }, "hexHpForTile");
+var remainingHpForTile = /* @__PURE__ */ __name((tile) => Math.max(0, hexHpForTile(tile) - (tile.damage ?? 0)), "remainingHpForTile");
 
 // ../shared/dist/engine/state.js
 var HIVE_RADIUS = 2;
@@ -254,8 +257,8 @@ var PATCH_RESPAWN_SECONDS = 1.5;
 var PATCH_LIFETIME_SECONDS = 28;
 var PATCH_MIN_CENTER_DISTANCE = 3;
 var QUEEN_ASSAULT_DURATION_SECONDS = 5;
-var QUEEN_ACTION_INTERVAL_SECONDS = 0.72;
-var QUEEN_DAMAGE_PER_STRIKE = 1;
+var QUEEN_ACTION_INTERVAL_SECONDS = 0.5;
+var QUEEN_DAMAGE_PER_STRIKE = 0.5;
 var FREED_LETTER_LIFETIME_SECONDS = 6;
 var LOG_MAX_ENTRIES = 14;
 var PATCH_TYPES = ["vowel", "common", "rare"];
@@ -284,26 +287,30 @@ var queenPerimeterLandingHexKeys = /* @__PURE__ */ __name((defender) => {
 var QUEEN_ATTACK_SIDE_HEX_SIZE = 30;
 var pickQueenLandingHexForSide = /* @__PURE__ */ __name((defender, attackSide, hexSize = QUEEN_ATTACK_SIDE_HEX_SIZE) => {
   const ring = queenPerimeterLandingHexKeys(defender);
-  const perimeterHexes = defender.tiles.filter((t) => ring.has(hexKey(t.hex)) && t.state !== "hive" && t.state !== "inactive").map((t) => t.hex);
-  if (perimeterHexes.length === 0)
+  const perimeterTiles = defender.tiles.filter((t) => ring.has(hexKey(t.hex)) && t.state !== "hive" && t.state !== "inactive");
+  if (perimeterTiles.length === 0)
     return null;
   const origin = hex(0, 0);
   const dir = attackSide === "top" ? { x: 0, y: -1 } : attackSide === "right" ? { x: 1, y: 0 } : attackSide === "bottom" ? { x: 0, y: 1 } : { x: -1, y: 0 };
-  const scored = perimeterHexes.map((h) => {
-    const { x, y } = axialToPixel(h, hexSize);
+  const scored = perimeterTiles.map((t) => {
+    const { x, y } = axialToPixel(t.hex, hexSize);
     const dot = x * dir.x + y * dir.y;
-    const d = cubeDistance(h, origin);
-    return { h, dot, d };
+    const d = cubeDistance(t.hex, origin);
+    const hp = remainingHpForTile(t);
+    return { t, dot, d, hp };
   });
-  const bestDot = Math.max(...scored.map((s) => s.dot));
-  const aligned = scored.filter((s) => s.dot >= bestDot - 1e-9);
-  aligned.sort((a, b) => {
-    const dd = b.d - a.d;
+  const onSide = scored.filter((s) => s.dot > 1e-9);
+  const pool = onSide.length > 0 ? onSide : scored;
+  pool.sort((a, b) => {
+    const dd = a.d - b.d;
     if (dd !== 0)
       return dd;
-    return hexKey(a.h).localeCompare(hexKey(b.h));
+    const hpDiff = a.hp - b.hp;
+    if (hpDiff !== 0)
+      return hpDiff;
+    return hexKey(a.t.hex).localeCompare(hexKey(b.t.hex));
   });
-  return aligned[0].h;
+  return pool[0].t.hex;
 }, "pickQueenLandingHexForSide");
 var pickQueenLandingHex = /* @__PURE__ */ __name((defender) => {
   const ring = queenPerimeterLandingHexKeys(defender);
@@ -311,9 +318,13 @@ var pickQueenLandingHex = /* @__PURE__ */ __name((defender) => {
   if (candidates.length === 0)
     return null;
   return candidates.sort((a, b) => {
-    const d = cubeDistance(b.hex, hex(0, 0)) - cubeDistance(a.hex, hex(0, 0));
-    if (d !== 0)
-      return d;
+    const da = cubeDistance(a.hex, hex(0, 0));
+    const db = cubeDistance(b.hex, hex(0, 0));
+    if (da !== db)
+      return da - db;
+    const hpDiff = remainingHpForTile(a) - remainingHpForTile(b);
+    if (hpDiff !== 0)
+      return hpDiff;
     return hexKey(a.hex).localeCompare(hexKey(b.hex));
   })[0].hex;
 }, "pickQueenLandingHex");
