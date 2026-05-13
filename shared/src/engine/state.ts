@@ -112,12 +112,12 @@ export const PATCH_LIFETIME_SECONDS = 28;
 /** Two patch centers must be at least this many hexes apart so their petal
  *  rings don't overlap. */
 export const PATCH_MIN_CENTER_DISTANCE = 3;
-export const QUEEN_ASSAULT_DURATION_SECONDS = 5;
+export const QUEEN_ASSAULT_DURATION_SECONDS = 3;
 export const QUEEN_LIFETIME_SECONDS = QUEEN_ASSAULT_DURATION_SECONDS;
 /** Seconds between queen strikes / steps during {@link BeeState} `queen-assault`. */
 export const QUEEN_ACTION_INTERVAL_SECONDS = 0.5;
 /** Damage dealt to a hex per queen strike (during {@link BeeState} `queen-assault`). */
-export const QUEEN_DAMAGE_PER_STRIKE = 0.5;
+export const QUEEN_DAMAGE_PER_STRIKE = 0.25;
 const FREED_LETTER_LIFETIME_SECONDS = 6;
 const LOG_MAX_ENTRIES = 14;
 const PATCH_TYPES: readonly FlowerType[] = ['vowel', 'common', 'rare'];
