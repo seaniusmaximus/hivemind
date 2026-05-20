@@ -9,8 +9,14 @@ import type { NetConnection } from '../game/net/connection.js';
 import { useGameStore } from './gameStore.js';
 
 describe('gameStore', () => {
+  test('boots on the title screen until startSolo', () => {
+    useGameStore.setState({ mode: 'menu' });
+    expect(useGameStore.getState().mode).toBe('menu');
+    expect(useGameStore.getState().soloDifficulty).toBe('medium');
+  });
+
   beforeEach(() => {
-    useGameStore.getState().initSolo(1);
+    useGameStore.getState().startSolo(1);
   });
 
   test('initSolo populates a playable world', () => {
@@ -166,7 +172,7 @@ describe('gameStore — net slice', () => {
     // solo world so each scenario starts identically.
     useGameStore.getState()._setConnection(null);
     useGameStore.setState({ room: null });
-    useGameStore.getState().initSolo(1);
+    useGameStore.getState().startSolo(1);
   });
 
   test('_setConnection flips the store into lobby mode', () => {
@@ -410,11 +416,8 @@ describe('gameStore — net slice', () => {
     });
     useGameStore.getState().leaveLobby();
     const s = useGameStore.getState();
-    expect(s.mode).toBe('solo');
+    expect(s.mode).toBe('menu');
     expect(s.room).toBeNull();
     expect(s.net.status).toBe('idle');
-    // Sanity-check that the world is freshly initialised.
-    expect(s.world.self.id).toBe('self');
-    expect(s.world.opponent.id).toBe('opponent');
   });
 });

@@ -1,5 +1,6 @@
 import type { Hex } from './hex.js';
 import type { Letter } from './letters.js';
+import type { QueenAttackSide } from './messages.js';
 
 export type BeeKind = 'worker' | 'carpenter' | 'drone' | 'queen';
 
@@ -11,10 +12,15 @@ export interface BeeStats {
   readonly flightSeconds: number;
 }
 
+/** Press-and-hold duration before a worker (or carpenter) dispatch — matches client UI. */
+export const WORKER_HOLD_SECONDS = 0.25;
+export const WORKER_HOLD_MS = WORKER_HOLD_SECONDS * 1000;
+
 export const BEE_STATS: Readonly<Record<BeeKind, BeeStats>> = {
   // Workers and paid carpenters: each hold spawns one bee that visits one
   // target (carpenter capacity 1). Post-cap free expansion overrides capacity
-  // and uses `carpenter-flying.queue` for additional frontier hexes in order.
+  // and uses `carpenter-flying.queue` for up to (word length − 2) frontier
+  // hexes around the capped word path, visited in order.
   worker: { capacity: 1, honeyCost: 3, flightSeconds: 1.5 },
   carpenter: { capacity: 1, honeyCost: 5, flightSeconds: 1.2 },
   // Drone caps are free — words pay you, they never charge you.
@@ -154,6 +160,10 @@ export type BeeState =
       readonly assaultPanel: 'self-hive' | 'opponent-hive';
       /** Hex on the defender's grid where the queen lands. */
       readonly landingHex: Hex;
+      /** When set, in-flight retargeting stays on this attack side. */
+      readonly attackSide?: QueenAttackSide;
+      /** Inward void hex keys along the approach at dispatch (rebuilt-tile retarget). */
+      readonly approachVoidHexKeys: readonly string[];
       /** Engine-time at which the assault phase ends. */
       readonly expiresAt: number;
       readonly flight: BeeFlight;

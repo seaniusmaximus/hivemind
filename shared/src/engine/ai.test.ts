@@ -11,7 +11,9 @@ import {
   tickSolo,
   type World,
 } from './state.js';
+import { WORKER_HOLD_SECONDS } from '../bees.js';
 import {
+  AI_ACTION_DELAY_SEC,
   findBestWord,
   planWord,
   pickPlacementTarget,
@@ -163,6 +165,57 @@ describe('pickCarpenterTarget', () => {
 // ---- tickSmartAi integration ------------------------------------------------
 
 describe('tickSmartAi', () => {
+  it('easy difficulty arms an action gate after the CPU acts', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng, undefined, { aiDifficulty: 'easy' });
+    w = {
+      ...w,
+      aiWorkerCooldown: 0,
+      aiActionDelay: 0,
+      opponent: { ...w.opponent, honey: 500 },
+    };
+    const beesBefore = w.opponent.bees.length;
+    w = tickSmartAi(w, 1 / 30, rng);
+    w = tickSmartAi(w, WORKER_HOLD_SECONDS, rng);
+    expect(w.opponent.bees.length).toBe(beesBefore + 1);
+    expect(w.aiActionDelay).toBeCloseTo(AI_ACTION_DELAY_SEC.easy, 5);
+    const beesMidGate = w.opponent.bees.length;
+    w = tickSmartAi(w, 0.5, rng);
+    expect(w.opponent.bees.length).toBe(beesMidGate);
+    expect(w.aiActionDelay).toBeGreaterThan(0);
+  });
+
+  it('medium difficulty waits for the human hold timer before one worker dispatch', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng, undefined, { aiDifficulty: 'medium' });
+    w = {
+      ...w,
+      aiWorkerCooldown: 0,
+      aiActionDelay: 0,
+      opponent: { ...w.opponent, honey: 500 },
+    };
+    const beesBefore = w.opponent.bees.length;
+    w = tickSmartAi(w, 1 / 30, rng);
+    expect(w.opponent.bees.length).toBe(beesBefore);
+    expect(w.aiWorkerHoldHex).not.toBeNull();
+    w = tickSmartAi(w, WORKER_HOLD_SECONDS, rng);
+    expect(w.opponent.bees.length).toBe(beesBefore + 1);
+    expect(w.aiWorkerHoldHex).toBeNull();
+  });
+
+  it('hard difficulty does not arm an action gate', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng, undefined, { aiDifficulty: 'hard' });
+    w = {
+      ...w,
+      aiWorkerCooldown: 0,
+      aiActionDelay: 0,
+      opponent: { ...w.opponent, honey: 500 },
+    };
+    w = tickSmartAi(w, 1 / 30, rng);
+    expect(w.aiActionDelay).toBe(0);
+  });
+
   it('does not crash on a fresh world', () => {
     const rng = fixedRng();
     const w = buildInitialWorld(rng);

@@ -1,4 +1,4 @@
-import { axialToPixel, hex, hexEquals, hexKey } from '../hex.js';
+import { axialToPixel, distance, hex, hexEquals, hexKey, neighbors } from '../hex.js';
 import { BEE_STATS, HEXES_PER_QUEEN_SLOT, HIVE, QUEEN_MIN_OWNED_HEXES } from '../bees.js';
 import { makeRng } from '../letters.js';
 import type { Petal } from '../messages.js';
@@ -14,6 +14,8 @@ import {
   honeyRateFor,
   petalAt,
   pickQueenLandingHexForSide,
+  pickQueenLandingHexWhileFlying,
+  queenApproachVoidHexKeys,
   placeLetter,
   queenAllowanceFor,
   queenPerimeterLandingHexKeys,
@@ -255,6 +257,78 @@ describe('engine: queen allowance scales with hive size', () => {
     expect(hexEquals(q1.state.landingHex, outer.hex)).toBe(true);
   });
 
+  test('in-flight queen retargets when its landing tile is destroyed', () => {
+    const rng = fixedRng();
+    const base = buildInitialWorld(rng);
+    let w = expandSelfToMinQueenTiles(base);
+    w = { ...w, self: { ...w.self, honey: BEE_STATS.queen.honeyCost + 1 } };
+    const ring = queenPerimeterLandingHexKeys(w.opponent);
+    const outer = w.opponent.tiles.find((t) => ring.has(hexKey(t.hex)))!;
+    const r0 = dispatchQueen(w, 'self', { target: outer.hex });
+    expect(r0.ok).toBe(true);
+    if (!r0.ok) return;
+    const q0 = r0.world.self.bees[r0.world.self.bees.length - 1]!;
+    let cur: World = {
+      ...r0.world,
+      opponent: {
+        ...r0.world.opponent,
+        tiles: r0.world.opponent.tiles.filter((t) => !hexEquals(t.hex, outer.hex)),
+      },
+    };
+    cur = tickWorld(cur, 1 / 30, rng);
+    const q1 = cur.self.bees.find((b) => b.id === q0.id);
+    expect(q1?.state.kind).toBe('queen-flying');
+    if (q1?.state.kind !== 'queen-flying') return;
+    expect(hexEquals(q1.state.landingHex, outer.hex)).toBe(false);
+    expect(queenPerimeterLandingHexKeys(cur.opponent).has(hexKey(q1.state.landingHex))).toBe(true);
+  });
+
+  test('in-flight queen retargets inward when a rebuilt tile blocks the ingress path', () => {
+    const base = buildInitialWorld(fixedRng());
+    let w = expandSelfToMinQueenTiles(base);
+    const origin = hex(0, 0);
+    const ring = queenPerimeterLandingHexKeys(w.opponent);
+    const outer = w.opponent.tiles.find((t) => ring.has(hexKey(t.hex)))!;
+    const inner = neighbors(outer.hex).find((n) => {
+      const t = w.opponent.tiles.find((tile) => hexEquals(tile.hex, n));
+      return (
+        t &&
+        t.state !== 'hive' &&
+        t.state !== 'inactive' &&
+        distance(n, origin) < distance(outer.hex, origin)
+      );
+    });
+    expect(inner).toBeDefined();
+    if (!inner) return;
+    const innerTile = w.opponent.tiles.find((t) => hexEquals(t.hex, inner))!;
+    const withoutInner: World = {
+      ...w,
+      opponent: {
+        ...w.opponent,
+        tiles: w.opponent.tiles.filter((t) => !hexEquals(t.hex, inner)),
+      },
+    };
+    const withInner: World = {
+      ...withoutInner,
+      opponent: {
+        ...withoutInner.opponent,
+        tiles: [
+          ...withoutInner.opponent.tiles,
+          { ...innerTile, state: 'active', letter: null, damage: 0, reuseCount: 0 },
+        ],
+      },
+    };
+    const approachKeys = queenApproachVoidHexKeys(withoutInner.opponent, outer.hex);
+    const desired = pickQueenLandingHexWhileFlying(
+      withInner.opponent,
+      outer.hex,
+      undefined,
+      approachKeys,
+    );
+    expect(desired).not.toBeNull();
+    expect(hexEquals(desired!, inner)).toBe(true);
+  });
+
   test('queen spawn rejects inner ring (non-perimeter) targets', () => {
     const base = buildInitialWorld(fixedRng());
     let w = expandSelfToMinQueenTiles(base);
@@ -323,6 +397,70 @@ describe('engine: queen allowance scales with hive size', () => {
     const r = dispatchQueen(w, 'self', { target: outer.hex, attackSide: 'top' });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('queen attack overspecified');
+  });
+});
+
+describe('engine: queen hive breach', () => {
+  test('queen occupying the hive center ends the game', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const queenBee = {
+      id: 'queen-test',
+      kind: 'queen' as const,
+      ownerId: w0.self.id,
+      capacity: 1,
+      state: {
+        kind: 'queen-assault' as const,
+        panel: 'opponent-hive' as const,
+        currentHex: hex(0, 0),
+        expiresAt: 100,
+        nextActionAt: 0,
+      },
+    };
+    const w: World = {
+      ...w0,
+      t: 1,
+      self: { ...w0.self, bees: [queenBee] },
+    };
+    const after = tickWorld(w, 0, fixedRng());
+    expect(after.phase).toBe('over');
+    expect(after.winner).toBe('self');
+  });
+});
+
+describe('engine: worker dispatch', () => {
+  test('prefers a freed letter over a flower petal at the same hex', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const h = hex(0, -2);
+    const patch = w0.patches[0]!;
+    const w: World = {
+      ...w0,
+      self: {
+        ...w0.self,
+        honey: 20,
+        freedLetters: [
+          {
+            id: 'freed-1',
+            hex: h,
+            letter: 'M',
+            spawnedAt: 0,
+            witherAt: 100,
+          },
+        ],
+      },
+      patches: [
+        {
+          ...patch,
+          petals: [{ hex: h, letter: 'Z', witherAt: 100 } satisfies Petal],
+        },
+        ...w0.patches.slice(1),
+      ],
+    };
+    expect(petalAt(w.patches, h)).not.toBeNull();
+    const r = dispatchWorker(w, 'self', h);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const worker = r.world.self.bees[r.world.self.bees.length - 1]!;
+    expect(worker.state.kind).toBe('worker-flying-to-freed');
   });
 });
 
@@ -625,6 +763,58 @@ describe('engine: drone caps a placed word', () => {
     expect(after.opponent.honey).toBeGreaterThanOrEqual(oppHoneyBefore);
   });
 
+  test('bee-related word expands every adjacent frontier hex (bee bloom)', () => {
+    const rng = fixedRng();
+    const path = [hex(0, -2), hex(1, -2), hex(2, -2), hex(2, -1), hex(1, -1)] as const;
+    const letters = ['Q', 'U', 'E', 'E', 'N'] as const;
+    let w = buildInitialWorld(rng);
+    w = {
+      ...w,
+      self: {
+        ...w.self,
+        honey: 30,
+        tiles: w.self.tiles.map((t) => {
+          const i = path.findIndex((h) => hexEquals(t.hex, h));
+          if (i >= 0) return { ...t, state: 'letter' as const, letter: letters[i]! };
+          return t;
+        }),
+      },
+    };
+    const submit = trySubmitWord(w, 'self', [path]);
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+    const mid = advance(submit.world, 1.5, rng);
+    expect(mid.log.some((e) => e.text.includes('pollen bloom'))).toBe(true);
+    const carpenter = mid.self.bees.find((b) => b.kind === 'carpenter');
+    expect(carpenter).toBeDefined();
+    if (carpenter?.state.kind !== 'carpenter-flying') return;
+    // QUEEN length 5 → normal budget would be 3; bee bloom takes all neighbors.
+    expect(carpenter.capacity).toBeGreaterThan(3);
+    const owned = new Set(mid.self.tiles.map((t) => hexKey(t.hex)));
+    const neighborTargets = new Map<string, Hex>();
+    for (const h of path) {
+      for (const n of neighbors(h)) {
+        const nk = hexKey(n);
+        if (owned.has(nk)) continue;
+        neighborTargets.set(nk, n);
+      }
+    }
+    let eligibleNeighbors = 0;
+    for (const n of neighborTargets.values()) {
+      const touchesHive = neighbors(n).some((nb) => {
+        const tile = mid.self.tiles.find((t) => hexEquals(t.hex, nb));
+        return (
+          tile &&
+          (tile.state === 'active' ||
+            tile.state === 'letter' ||
+            tile.state === 'capped')
+        );
+      });
+      if (touchesHive) eligibleNeighbors++;
+    }
+    expect(carpenter.capacity).toBe(eligibleNeighbors);
+  });
+
   test('capping schedules one free carpenter that chains frontier hexes (no honey cost)', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
@@ -652,7 +842,9 @@ describe('engine: drone caps a placed word', () => {
     expect(carpenters.every((b) => b.state.kind === 'carpenter-flying')).toBe(true);
     const chain = carpenters[0]!;
     if (chain.state.kind === 'carpenter-flying') {
-      expect(chain.capacity).toBe(1 + chain.state.queue.length);
+      // CAT is length 3 → n − 2 = 1 free frontier tile.
+      expect(chain.capacity).toBe(1);
+      expect(chain.state.queue).toHaveLength(0);
     }
     // Word payout applied; auto carpenters must not apply the 5-honey hold fee.
     expect(mid.self.honey).toBeGreaterThan(12);
@@ -662,7 +854,7 @@ describe('engine: drone caps a placed word', () => {
 });
 
 describe('engine: branch reuse honey bonus', () => {
-  test('two paths sharing only uncapped letters pay sum without reuse bonus', () => {
+  test('rejects submitting more than one word per drone', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
     const w1 = [hex(-2, 0), hex(-1, -1), hex(0, -2)] as const;
@@ -683,13 +875,9 @@ describe('engine: branch reuse honey bonus', () => {
       },
     };
     const submit = trySubmitWord(w, 'self', [w1, w2]);
-    expect(submit.ok).toBe(true);
-    if (!submit.ok) return;
-    const after = advance(submit.world, 4.0, rng);
-    // CAT (5) + TAB (5) = 10; no prior-capped tiles in either path → no 1.5×.
-    expect(after.self.honey).toBeGreaterThan(16);
-    expect(after.self.tiles.filter((t) => t.state === 'capped').length).toBeGreaterThanOrEqual(5);
-    expect(after.log.every((e) => !e.text.includes('reuse'))).toBe(true);
+    expect(submit.ok).toBe(false);
+    if (submit.ok) return;
+    expect(submit.reason).toMatch(/one word per drone/i);
   });
 
   test('a word through a prior-capped letter pays 1.5× that word score', () => {
@@ -717,32 +905,34 @@ describe('engine: branch reuse honey bonus', () => {
     expect(after.log.some((e) => e.text.includes('AT') && e.text.includes('reuse'))).toBe(true);
   });
 
-  test('two non-overlapping words pay only the sum (no reuse bonus)', () => {
+  test('reuse cap still schedules frontier expansion from the word path', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
-    const w1 = [hex(-2, 0), hex(-1, -1)] as const;
-    const w2 = [hex(2, -2), hex(1, -1)] as const;
+    const path = [hex(0, -2), hex(1, -2), hex(2, -2), hex(2, -1)] as const;
     w = {
       ...w,
       self: {
         ...w.self,
-        honey: 8,
+        honey: 30,
         tiles: w.self.tiles.map((t) => {
-          if (hexEquals(t.hex, w1[0])) return { ...t, state: 'letter', letter: 'A' };
-          if (hexEquals(t.hex, w1[1])) return { ...t, state: 'letter', letter: 'T' };
-          if (hexEquals(t.hex, w2[0])) return { ...t, state: 'letter', letter: 'B' };
-          if (hexEquals(t.hex, w2[1])) return { ...t, state: 'letter', letter: 'E' };
+          if (hexEquals(t.hex, path[0])) return { ...t, state: 'capped', letter: 'C' };
+          if (hexEquals(t.hex, path[1])) return { ...t, state: 'letter', letter: 'A' };
+          if (hexEquals(t.hex, path[2])) return { ...t, state: 'letter', letter: 'T' };
+          if (hexEquals(t.hex, path[3])) return { ...t, state: 'letter', letter: 'S' };
           return t;
         }),
       },
     };
-    const submit = trySubmitWord(w, 'self', [w1, w2]);
+    const submit = trySubmitWord(w, 'self', [path]);
     expect(submit.ok).toBe(true);
     if (!submit.ok) return;
-    const after = advance(submit.world, 4.0, rng);
-    // AT (2) + BE (4) = 6 baseline, no prior-capped letters.
-    expect(after.self.honey).toBeGreaterThanOrEqual(14); // 8 (no drone cost) + 6
-    expect(after.log.every((e) => !e.text.includes('reuse'))).toBe(true);
+    const mid = advance(submit.world, 1.5, rng);
+    const carpenter = mid.self.bees.find((b) => b.kind === 'carpenter');
+    expect(carpenter).toBeDefined();
+    if (carpenter?.state.kind === 'carpenter-flying') {
+      // CATS length 4 → n − 2 = 2 frontier tiles.
+      expect(carpenter.capacity).toBe(2);
+    }
   });
 });
 
@@ -769,13 +959,11 @@ describe('engine: branches reuse capped tiles', () => {
 });
 
 describe('engine: word submission replay rules', () => {
-  test('accepts more paths than drone capacity in one submit', () => {
+  test('rejects multiple paths in one submit', () => {
     const rng = fixedRng();
     let w = buildInitialWorld(rng);
     const p1 = [hex(0, -2), hex(1, -2)] as const;
     const p2 = [hex(1, -2), hex(2, -2)] as const;
-    const p3 = [hex(-2, 0), hex(-1, -1)] as const;
-    const p4 = [hex(-2, 2), hex(-1, 1)] as const;
     w = {
       ...w,
       self: {
@@ -785,16 +973,14 @@ describe('engine: word submission replay rules', () => {
           if (hexEquals(t.hex, p1[0])) return { ...t, state: 'letter', letter: 'A' };
           if (hexEquals(t.hex, p1[1])) return { ...t, state: 'letter', letter: 'T' };
           if (hexEquals(t.hex, p2[1])) return { ...t, state: 'letter', letter: 'E' };
-          if (hexEquals(t.hex, p3[0])) return { ...t, state: 'letter', letter: 'B' };
-          if (hexEquals(t.hex, p3[1])) return { ...t, state: 'letter', letter: 'E' };
-          if (hexEquals(t.hex, p4[0])) return { ...t, state: 'letter', letter: 'N' };
-          if (hexEquals(t.hex, p4[1])) return { ...t, state: 'letter', letter: 'O' };
           return t;
         }),
       },
     };
-    const submit = trySubmitWord(w, 'self', [p1, p2, p3, p4]);
-    expect(submit.ok).toBe(true);
+    const submit = trySubmitWord(w, 'self', [p1, p2]);
+    expect(submit.ok).toBe(false);
+    if (submit.ok) return;
+    expect(submit.reason).toMatch(/one word per drone/i);
   });
 
   test('rejects replaying the exact same word on the same hex letters', () => {

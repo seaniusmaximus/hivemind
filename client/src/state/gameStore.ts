@@ -4,8 +4,10 @@ import {
   applyCommand as engineApplyCommand,
   BEE_STATS,
   QUEEN_MIN_OWNED_HEXES,
+  AI_DIFFICULTIES,
   buildInitialWorld,
   frontierFor,
+  type AiDifficulty,
   hexEquals,
   hexKey,
   isAdjacent,
@@ -29,6 +31,7 @@ import {
   type WorldSnapshot,
 } from '@hivemind/shared';
 import { playCommandSfx } from '../game/audio/sfx.js';
+import { drainWordCapHoneyToasts } from '../game/wordCapHoneyToast.js';
 import { resetWordCapHoneyToastSeen } from '../game/wordCapHoneyToastSeen.js';
 import { wordStatus } from '../game/dictionary.js';
 import {
@@ -94,13 +97,17 @@ const newCommandId = (): string => `c${++commandCounter}`;
 
 /**
  * High-level mode the app is currently in.
+ * - `'menu'`: title screen; no game simulation.
  * - `'solo'`: local engine ticks the world; no network.
  * - `'lobby'`: connected (or connecting) to the server, browsing or waiting in
  *   a room. The game UI is hidden in favour of the {@link Lobby} screen.
  * - `'online'`: an authoritative match is in flight. `world` is replaced on
  *   every `SNAPSHOT` and the local tick is a no-op.
  */
-export type AppMode = 'solo' | 'lobby' | 'online';
+export type AppMode = 'menu' | 'solo' | 'lobby' | 'online';
+
+export type { AiDifficulty };
+export { AI_DIFFICULTIES };
 
 export interface RoomState {
   readonly code: string;
@@ -124,8 +131,11 @@ interface GameStore {
   panel: PanelIndex;
   setPanel: (panel: PanelIndex) => void;
 
-  // ---- multiplayer slice ----
+  // ---- navigation / multiplayer slice ----
   mode: AppMode;
+  /** Selected on the title screen before {@link startSolo}. */
+  soloDifficulty: AiDifficulty;
+  setSoloDifficulty: (level: AiDifficulty) => void;
   net: NetState;
   room: RoomState | null;
 
@@ -165,6 +175,10 @@ interface GameStore {
   debugAdjustHoney: (side: Side, delta: number) => void;
 
   initSolo: (seed?: number) => void;
+  /** Begin a local match from the title screen (applies {@link soloDifficulty}). */
+  startSolo: (seed?: number) => void;
+  /** Return to the title screen from solo or after leaving a room. */
+  enterMenu: () => void;
   tick: (dt: number) => void;
 
   /**
@@ -269,6 +283,10 @@ const snapshotToWorld = (snap: WorldSnapshot): World => ({
   aiPlaceCooldown: 0,
   aiPhantomCooldown: 0,
   aiCarpenterCooldown: 0,
+  aiDifficulty: 'medium',
+  aiActionDelay: 0,
+  aiWorkerHoldHex: null,
+  aiWorkerHoldElapsed: 0,
   winner: snap.winner,
   log: snap.log,
 });
@@ -305,6 +323,22 @@ const clearQueenTimer = () => {
 };
 
 export const useGameStore = create<GameStore>((set, get) => {
+  const pushWordCapHoneyToastFromLog = (
+    prevLog: World['log'],
+    nextLog: World['log'],
+    selfId: string,
+  ): void => {
+    drainWordCapHoneyToasts(prevLog, nextLog, selfId, ({ text, variant, lifetimeMs }) => {
+      get().pushToast({
+        text,
+        panel: 'self-hive',
+        hex: { q: 0, r: 0 },
+        variant,
+        lifetimeMs,
+      });
+    });
+  };
+
   const wireRoomConnection = (roomCode: string, playerName: string) => {
     conn = openRoomConnection(roomCode.toUpperCase(), {
       onMessage: (msg) => get()._handleServerMessage(msg),
@@ -322,7 +356,9 @@ export const useGameStore = create<GameStore>((set, get) => {
   panel: 1,
   setPanel: (panel) => set({ panel }),
 
-  mode: 'solo',
+  mode: 'menu',
+  soloDifficulty: 'medium',
+  setSoloDifficulty: (level) => set({ soloDifficulty: level }),
   net: { status: 'idle', lastError: null },
   room: null,
 
@@ -391,8 +427,9 @@ export const useGameStore = create<GameStore>((set, get) => {
   initSolo: (seed) => {
     reseed(seed ?? Date.now() & 0xffffffff);
     clearQueenTimer();
+    const aiDifficulty = get().soloDifficulty;
     set({
-      world: buildInitialWorld(rng),
+      world: buildInitialWorld(rng, undefined, { aiDifficulty }),
       wordDrafts: [],
       letterDrag: null,
       dropHover: null,
@@ -405,8 +442,37 @@ export const useGameStore = create<GameStore>((set, get) => {
     resetWordCapHoneyToastSeen(get().world.log.map((e) => e.id));
   },
 
+  startSolo: (seed) => {
+    get().initSolo(seed);
+    set({ mode: 'solo' });
+  },
+
+  enterMenu: () => {
+    multiplayerSession = null;
+    if (conn) {
+      conn.send({ type: 'LEAVE' });
+      conn.close();
+      conn = null;
+    }
+    clearQueenTimer();
+    set({
+      mode: 'menu',
+      net: { status: 'idle', lastError: null },
+      room: null,
+      queenTargeting: null,
+      wordDrafts: [],
+      letterDrag: null,
+      dropHover: null,
+      lastError: null,
+      toasts: [],
+    });
+  },
+
   tick: (dt) => {
+    const prevLog = get().world.log;
+    const selfId = get().world.self.id;
     set((s) => {
+      if (s.mode === 'menu' || s.mode === 'lobby') return s;
       if (s.mode === 'online') {
         // Run the pure engine simulation locally for smooth bee animations
         // and honey trickle between snapshots — every SNAPSHOT replaces
@@ -420,15 +486,21 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
       return { world: tickSolo(s.world, dt, rng) };
     });
+    pushWordCapHoneyToastFromLog(prevLog, get().world.log, selfId);
   },
 
   applyCommand: (cmd, side = 'self') => {
     // Always apply locally first — both for solo and as client-prediction in
     // online mode. The next SNAPSHOT reconciles authoritative state.
+    const prevLog = get().world.log;
+    const selfId = get().world.self.id;
     const r = engineApplyCommand(get().world, side, cmd);
     if (r.ok) {
       if (side === 'self') playCommandSfx(cmd);
       set({ world: r.world, lastError: null });
+      if (side === 'self') {
+        pushWordCapHoneyToastFromLog(prevLog, get().world.log, selfId);
+      }
     } else {
       set({ lastError: r.reason });
     }
@@ -723,9 +795,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
   enterLobby: () => {
     set((s) => {
-      // Don't clobber an active connection. If we're already in lobby/online,
-      // re-entering is a no-op.
-      if (s.mode !== 'solo') return s;
+      if (s.mode !== 'solo' && s.mode !== 'menu') return s;
       return {
         mode: 'lobby',
         net: { status: 'idle', lastError: null },
@@ -735,22 +805,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   },
 
   leaveLobby: () => {
-    multiplayerSession = null;
-    if (conn) {
-      // Best-effort polite leave — the server's room teardown handles it
-      // even if the frame doesn't make it out.
-      conn.send({ type: 'LEAVE' });
-      conn.close();
-      conn = null;
-    }
-    clearQueenTimer();
-    set({
-      mode: 'solo',
-      net: { status: 'idle', lastError: null },
-      room: null,
-      queenTargeting: null,
-    });
-    get().initSolo();
+    get().enterMenu();
   },
 
   createRoom: async (playerName) => {
@@ -805,12 +860,12 @@ export const useGameStore = create<GameStore>((set, get) => {
   _setConnection: (next) => {
     conn = next;
     if (!next) multiplayerSession = null;
-    set({
-      mode: next ? 'lobby' : 'solo',
+    set((s) => ({
+      mode: next ? 'lobby' : s.mode === 'online' ? 'menu' : s.mode,
       net: next
         ? { status: 'open', lastError: null }
         : { status: 'idle', lastError: null },
-    });
+    }));
   },
 
   _handleServerMessage: (msg) => {
@@ -858,7 +913,10 @@ export const useGameStore = create<GameStore>((set, get) => {
         break;
       }
       case 'SNAPSHOT': {
+        const prevLog = get().world.log;
+        const selfId = get().world.self.id;
         set({ world: snapshotToWorld(msg.world) });
+        pushWordCapHoneyToastFromLog(prevLog, get().world.log, selfId);
         resetWordCapHoneyToastSeen(get().world.log.map((e) => e.id));
         break;
       }

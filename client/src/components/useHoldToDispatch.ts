@@ -22,9 +22,9 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { hexEquals, type Hex } from '@hivemind/shared';
+import { hexEquals, WORKER_HOLD_MS, type Hex } from '@hivemind/shared';
 
-export const HOLD_DURATION_MS = 250;
+export const HOLD_DURATION_MS = WORKER_HOLD_MS;
 
 const holdSecondsValue = HOLD_DURATION_MS / 1000;
 /** Copy for subtitles / hints — avoids showing "0s" when the hold is sub-second. */

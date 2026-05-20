@@ -22,6 +22,7 @@ import {
 import {
   BEE_STATS,
   QUEEN_MIN_OWNED_HEXES,
+  WORKER_HOLD_SECONDS,
 } from '../bees.js';
 import type { Letter } from '../letters.js';
 import type { PlayerState, TileSnapshot } from '../messages.js';
@@ -504,15 +505,47 @@ export const pickCarpenterTarget = (player: PlayerState): Hex | null => {
 // Main AI tick
 // ---------------------------------------------------------------------------
 
+export type AiDifficulty = 'easy' | 'medium' | 'hard';
+
+export const AI_DIFFICULTIES: readonly AiDifficulty[] = ['easy', 'medium', 'hard'];
+
+/** Extra pause after each CPU action burst (seconds). Hard has no gate. */
+export const AI_ACTION_DELAY_SEC: Readonly<Record<AiDifficulty, number>> = {
+  easy: 4.5,
+  medium: 2,
+  hard: 0,
+};
+
 const AI_WORKER_COOLDOWN    = 1.5;
 const AI_PLAN_COOLDOWN      = 1.0;
 const AI_WORD_COOLDOWN      = 1.5;
 const AI_CARPENTER_COOLDOWN = 8;
 const AI_QUEEN_COOLDOWN     = 20;
 
+const workerHoldTargetValid = (world: World, target: Hex): boolean => {
+  const key = hexKey(target);
+  const petalLive = world.patches.some((p) =>
+    p.petals.some((pt) => hexKey(pt.hex) === key),
+  );
+  if (petalLive) return true;
+  return (world.opponent.freedLetters ?? []).some(
+    (f) => hexKey(f.hex) === key && f.witherAt > world.t,
+  );
+};
+
 export const tickSmartAi = (world: World, dt: number, rng: () => number): World => {
   if (world.phase === 'over') return world;
   let next = world;
+  let aiActionDelay = Math.max(0, next.aiActionDelay - dt);
+  if (aiActionDelay > 0) {
+    return { ...next, aiActionDelay };
+  }
+
+  const armActionGate = (): void => {
+    const delay = AI_ACTION_DELAY_SEC[next.aiDifficulty];
+    if (delay > 0) aiActionDelay = delay;
+  };
+
   let {
     aiWorkerCooldown,
     aiPlaceCooldown: aiPlanCooldown,
@@ -524,8 +557,29 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
   aiWordCooldown -= dt;
   aiCarpenterCooldown -= dt;
 
+  let aiWorkerHoldHex = next.aiWorkerHoldHex;
+  let aiWorkerHoldElapsed = next.aiWorkerHoldElapsed;
+  const simulateWorkerHold = next.aiDifficulty !== 'hard';
+
   // ---- 1. Workers: fill storage with a balanced vowel/consonant mix ----
-  if (aiWorkerCooldown <= 0) {
+  if (simulateWorkerHold && aiWorkerHoldHex) {
+    if (!workerHoldTargetValid(next, aiWorkerHoldHex)) {
+      aiWorkerHoldHex = null;
+      aiWorkerHoldElapsed = 0;
+    } else {
+      aiWorkerHoldElapsed += dt;
+      if (aiWorkerHoldElapsed >= WORKER_HOLD_SECONDS) {
+        const r = dispatchWorker(next, 'opponent', aiWorkerHoldHex);
+        if (r.ok) {
+          next = r.world;
+          armActionGate();
+        }
+        aiWorkerHoldHex = null;
+        aiWorkerHoldElapsed = 0;
+        aiWorkerCooldown = AI_WORKER_COOLDOWN + rng() * 0.5;
+      }
+    }
+  } else if (aiWorkerCooldown <= 0) {
     const ai = next.opponent;
     const emptySlots = ai.tiles.filter((t) => t.state === 'storage' && !t.letter).length;
     const inflight = ai.bees.filter(
@@ -555,6 +609,10 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
         if (b.state.kind === 'worker-flying-to-freed') claimed.add(hexKey(b.state.target));
       }
 
+      const freedTargets = (ai.freedLetters ?? [])
+        .filter((f) => f.witherAt > next.t && !claimed.has(hexKey(f.hex)))
+        .map((f) => f.hex);
+
       const allPetals = next.patches
         .flatMap((p) => p.petals.map((pt) => ({ hex: pt.hex, letter: pt.letter, type: p.type })))
         .filter((p) => !claimed.has(hexKey(p.hex)));
@@ -564,18 +622,41 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
       );
       const pool = preferred.length > 0 ? preferred : allPetals;
 
+      const targets: Hex[] = [...freedTargets];
+      for (const p of pool) {
+        if (targets.length >= slotsNeeded) break;
+        if (targets.some((h) => hexKey(h) === hexKey(p.hex))) continue;
+        targets.push(p.hex);
+      }
+
       const toSend = Math.min(
         slotsNeeded,
-        pool.length,
+        targets.length,
         Math.floor(ai.honey / BEE_STATS.worker.honeyCost),
       );
-      for (let i = 0; i < toSend; i++) {
-        const pick = pool[i]!;
-        const r = dispatchWorker(next, 'opponent', pick.hex);
-        if (r.ok) next = r.world;
+
+      if (simulateWorkerHold) {
+        const pick = targets[0];
+        if (pick) {
+          aiWorkerHoldHex = pick;
+          aiWorkerHoldElapsed = 0;
+        }
+      } else {
+        let dispatched = false;
+        for (let i = 0; i < toSend; i++) {
+          const pick = targets[i]!;
+          const r = dispatchWorker(next, 'opponent', pick);
+          if (r.ok) {
+            next = r.world;
+            dispatched = true;
+          }
+        }
+        if (dispatched) armActionGate();
+        aiWorkerCooldown = AI_WORKER_COOLDOWN + rng() * 0.5;
       }
+    } else if (!simulateWorkerHold) {
+      aiWorkerCooldown = AI_WORKER_COOLDOWN + rng() * 0.5;
     }
-    aiWorkerCooldown = AI_WORKER_COOLDOWN + rng() * 0.5;
   }
 
   // ---- 2. Plan + Place: wait for storage to fill, plan a word, place ----
@@ -593,6 +674,7 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
     const enoughToTry = filledSlots.length >= 3;
 
     if (enoughToTry && (storageWillFill || filledSlots.length >= 4)) {
+      let placed = false;
       const plan = planWord(ai);
       if (plan) {
         for (const p of plan.placements) {
@@ -606,7 +688,10 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
             );
             if (source) {
               const r = placeLetter(next, 'opponent', source.storageHex, p.hex);
-              if (r.ok) next = r.world;
+              if (r.ok) {
+                next = r.world;
+                placed = true;
+              }
             }
           }
         }
@@ -616,9 +701,13 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
           const target = pickPlacementTarget(next.opponent);
           if (!target) break;
           const r = placeLetter(next, 'opponent', slot.hex, target.hex);
-          if (r.ok) next = r.world;
+          if (r.ok) {
+            next = r.world;
+            placed = true;
+          }
         }
       }
+      if (placed) armActionGate();
     }
     aiPlanCooldown = AI_PLAN_COOLDOWN + rng() * 0.5;
   }
@@ -631,7 +720,10 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
       const candidate = findBestWord(ai);
       if (candidate) {
         const r = trySubmitWord(next, 'opponent', [candidate.path]);
-        if (r.ok) next = r.world;
+        if (r.ok) {
+          next = r.world;
+          armActionGate();
+        }
       }
     }
     aiWordCooldown = AI_WORD_COOLDOWN + rng() * 1;
@@ -647,7 +739,10 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
       const target = pickCarpenterTarget(ai);
       if (target) {
         const r = dispatchCarpenter(next, 'opponent', target);
-        if (r.ok) next = r.world;
+        if (r.ok) {
+          next = r.world;
+          armActionGate();
+        }
       }
     }
     aiCarpenterCooldown = AI_CARPENTER_COOLDOWN + rng() * 3;
@@ -661,7 +756,10 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
     activeQueenCountFor(ai) < queenAllowanceFor(ai);
   if (canQueen && rng() < dt / AI_QUEEN_COOLDOWN) {
     const r = dispatchQueen(next, 'opponent');
-    if (r.ok) next = r.world;
+    if (r.ok) {
+      next = r.world;
+      armActionGate();
+    }
   }
 
   return {
@@ -670,5 +768,8 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
     aiPlaceCooldown: aiPlanCooldown,
     aiPhantomCooldown: aiWordCooldown,
     aiCarpenterCooldown,
+    aiActionDelay,
+    aiWorkerHoldHex,
+    aiWorkerHoldElapsed,
   };
 };

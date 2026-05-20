@@ -2133,6 +2133,133 @@ button.ghost {
   box-shadow: 0 0 8px rgba(255, 196, 65, 0.35) inset;
 }
 
+/* ---- Title / start screen ------------------------------------------------ */
+
+.start-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 1rem;
+  z-index: var(--z-lobby);
+  overflow-y: auto;
+}
+
+.start-screen-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  width: min(32rem, 96vw);
+  align-items: stretch;
+}
+
+.start-screen-title {
+  font-size: 1.35rem;
+  text-align: center;
+  margin: 0;
+}
+
+.start-screen-tagline {
+  margin: -0.5rem 0 0;
+  text-align: center;
+  font-family: 'VT323', monospace;
+  font-size: 1.35rem;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.menu-card {
+  background: var(--bg-deep);
+  border: 2px solid var(--neon-cyan);
+  box-shadow: 0 0 32px rgba(64, 219, 255, 0.35);
+  padding: 1.4rem 1.4rem 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.menu-card-heading {
+  font-family: 'Press Start 2P', system-ui, sans-serif;
+  font-size: 0.65rem;
+  letter-spacing: 0.1em;
+  margin: 0;
+  text-align: center;
+  color: var(--neon-cyan);
+}
+
+.menu-difficulty {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.menu-difficulty-legend {
+  font-family: 'Press Start 2P', system-ui, sans-serif;
+  font-size: 0.5rem;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  text-align: center;
+  margin: 10px 0;
+}
+
+.menu-difficulty-options {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.menu-difficulty-option {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: 'Press Start 2P', system-ui, sans-serif;
+  font-size: 0.55rem;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  padding: 0.45rem 0.55rem;
+  border: 1px solid rgba(64, 219, 255, 0.35);
+  background: rgba(11, 4, 32, 0.6);
+  transition:
+    border-color 0.15s,
+    color 0.15s,
+    box-shadow 0.15s;
+}
+
+.menu-difficulty-option:has(input:checked) {
+  border-color: var(--honey);
+  color: var(--honey);
+  box-shadow: 0 0 10px rgba(255, 196, 65, 0.35);
+}
+
+.menu-difficulty-option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.menu-difficulty-note {
+  margin: 0;
+  font-family: 'VT323', monospace;
+  font-size: 1.1rem;
+  line-height: 1.2;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.menu-play-button {
+  margin-top: 0.25rem;
+}
+
+.menu-net-status {
+  margin-top: 0.25rem;
+}
+
 .game-over-reason {
   font-family: 'Press Start 2P', system-ui, sans-serif;
   font-size: 0.55rem;

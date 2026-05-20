@@ -5,4 +5,5 @@ export * from './messages.js';
 export * from './scoring.js';
 export * from './tileHp.js';
 export * from './dictionary.js';
+export * from './beeWords.js';
 export * from './engine/state.js';

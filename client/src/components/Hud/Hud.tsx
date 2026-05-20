@@ -1,33 +1,9 @@
-import { honeyCapFor } from '@hivemind/shared';
 import { useGameStore } from '../../state/gameStore.js';
 
-const Stat = ({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string | number;
-  accent?: string;
-}) => (
-  <div className="hud-stat" data-accent={accent}>
-    <span>{label}</span>
-    <span>{value}</span>
-  </div>
-);
-
-const formatHoney = (current: number, cap: number): string =>
-  `${Math.floor(current)}/${Math.floor(cap)}`;
-
 export const Hud = () => {
-  const self = useGameStore((s) => s.world.self);
-  const opponent = useGameStore((s) => s.world.opponent);
   const mode = useGameStore((s) => s.mode);
-  const enterLobby = useGameStore((s) => s.enterLobby);
+  const enterMenu = useGameStore((s) => s.enterMenu);
   const leaveLobby = useGameStore((s) => s.leaveLobby);
-
-  const selfCap = honeyCapFor(self);
-  const oppCap = honeyCapFor(opponent);
 
   return (
     <header className="hud">
@@ -36,10 +12,10 @@ export const Hud = () => {
           <button
             type="button"
             className="hud-net-button"
-            onClick={() => enterLobby()}
-            aria-label="open multiplayer lobby"
+            onClick={() => enterMenu()}
+            aria-label="return to main menu"
           >
-            ONLINE
+            MENU
           </button>
         ) : (
           <button

@@ -186,10 +186,13 @@ var drawFlowerLetter = /* @__PURE__ */ __name((type, rng) => {
 }, "drawFlowerLetter");
 
 // ../shared/dist/bees.js
+var WORKER_HOLD_SECONDS = 0.25;
+var WORKER_HOLD_MS = WORKER_HOLD_SECONDS * 1e3;
 var BEE_STATS = {
   // Workers and paid carpenters: each hold spawns one bee that visits one
   // target (carpenter capacity 1). Post-cap free expansion overrides capacity
-  // and uses `carpenter-flying.queue` for additional frontier hexes in order.
+  // and uses `carpenter-flying.queue` for up to (word length − 2) frontier
+  // hexes around the capped word path, visited in order.
   worker: { capacity: 1, honeyCost: 3, flightSeconds: 1.5 },
   carpenter: { capacity: 1, honeyCost: 5, flightSeconds: 1.2 },
   // Drone caps are free — words pay you, they never charge you.
@@ -327,6 +330,47 @@ var buildSet = /* @__PURE__ */ __name(() => {
 }, "buildSet");
 var WORDS = buildSet();
 
+// ../shared/dist/beeWords.js
+var BEE_RELATED_WORDS_LIST = [
+  "BEE",
+  "BEES",
+  "QUEEN",
+  "QUEENS",
+  "WORKER",
+  "WORKERS",
+  "DRONE",
+  "DRONES",
+  "CARPENTER",
+  "CARPENTERS",
+  "SCOUT",
+  "SCOUTS",
+  "APIARY",
+  "APIARIES",
+  "HONEY",
+  "BROOD",
+  "BROODS",
+  "SWARM",
+  "SWARMS",
+  "WAGGLE",
+  "COMB",
+  "COMBS",
+  "HONEYCOMB",
+  "HONEYCOMBs",
+  "WAX",
+  "BEESWAX",
+  "NECTAR",
+  "POLLEN",
+  "THORAX",
+  "ANTENNAE",
+  "PROBOSCIS",
+  "WING",
+  "WINGS",
+  "LARVA",
+  "LARVAE"
+];
+var BEE_RELATED_WORDS = new Set(BEE_RELATED_WORDS_LIST);
+var isBeeRelatedWord = /* @__PURE__ */ __name((word) => BEE_RELATED_WORDS.has(word.trim()), "isBeeRelatedWord");
+
 // ../shared/dist/engine/state.js
 var HIVE_RADIUS = 2;
 var FIELD_RADIUS = 4;
@@ -407,6 +451,129 @@ var pickQueenLandingHex = /* @__PURE__ */ __name((defender) => {
 }, "pickQueenLandingHex");
 var isQueenLandingHex = /* @__PURE__ */ __name((defender, h) => defender.tiles.some((t) => hexEquals(t.hex, h) && t.state !== "hive" && t.state !== "inactive"), "isQueenLandingHex");
 var isQueenSpawnTargetHex = /* @__PURE__ */ __name((defender, h) => isQueenLandingHex(defender, h) && queenPerimeterLandingHexKeys(defender).has(hexKey(h)), "isQueenSpawnTargetHex");
+var pickQueenPerimeterLanding = /* @__PURE__ */ __name((defender, attackSide) => attackSide !== void 0 ? pickQueenLandingHexForSide(defender, attackSide) : pickQueenLandingHex(defender), "pickQueenPerimeterLanding");
+var queenApproachVoidHexKeys = /* @__PURE__ */ __name((defender, landing) => {
+  const origin = hex(0, 0);
+  const landingDist = cubeDistance(landing, origin);
+  const tileByKey = new Map(defender.tiles.map((t) => [hexKey(t.hex), t]));
+  const keys = [];
+  for (const n of neighbors(landing)) {
+    if (tileByKey.has(hexKey(n)))
+      continue;
+    if (cubeDistance(n, origin) >= landingDist)
+      continue;
+    keys.push(hexKey(n));
+  }
+  return keys;
+}, "queenApproachVoidHexKeys");
+var pickQueenLandingHexWhileFlying = /* @__PURE__ */ __name((defender, currentLanding, attackSide, approachVoidHexKeys) => {
+  if (!isQueenLandingHex(defender, currentLanding)) {
+    return pickQueenPerimeterLanding(defender, attackSide);
+  }
+  const origin = hex(0, 0);
+  const currentDist = cubeDistance(currentLanding, origin);
+  if (approachVoidHexKeys && approachVoidHexKeys.length > 0) {
+    const tileByKey = new Map(defender.tiles.map((t) => [hexKey(t.hex), t]));
+    let rebuilt = null;
+    let rebuiltDist = currentDist;
+    for (const k of approachVoidHexKeys) {
+      const tile = tileByKey.get(k);
+      if (!tile || !isQueenLandingHex(defender, tile.hex))
+        continue;
+      const d = cubeDistance(tile.hex, origin);
+      if (d < rebuiltDist) {
+        rebuiltDist = d;
+        rebuilt = tile.hex;
+      }
+    }
+    if (rebuilt)
+      return rebuilt;
+  }
+  const corridor = pickIngressLandableOnCorridor(defender, currentLanding);
+  if (corridor) {
+    const corridorDist = cubeDistance(corridor, origin);
+    const adjacent = neighbors(currentLanding).some((n) => hexEquals(n, corridor));
+    if (corridorDist < currentDist && !adjacent && hasVoidIngressPath(defender, currentLanding, corridor)) {
+      return corridor;
+    }
+  }
+  return currentLanding;
+}, "pickQueenLandingHexWhileFlying");
+var pickIngressLandableOnCorridor = /* @__PURE__ */ __name((defender, from) => {
+  const origin = hex(0, 0);
+  const fromDist = cubeDistance(from, origin);
+  const tileByKey = new Map(defender.tiles.map((t) => [hexKey(t.hex), t]));
+  const maxHullRadius = defender.tiles.reduce((m, t) => Math.max(m, cubeDistance(t.hex, origin)), 0);
+  const maxVoidReach = maxHullRadius + 4;
+  const visitBudget = Math.min(2e3, defender.tiles.length * 24 + 128);
+  const dist = /* @__PURE__ */ new Map();
+  dist.set(hexKey(from), 0);
+  const q = [from];
+  let best = null;
+  let bestCenterDist = fromDist;
+  let visits = 0;
+  while (q.length > 0 && visits < visitBudget) {
+    visits++;
+    const cur = q.shift();
+    const curKey = hexKey(cur);
+    const curSteps = dist.get(curKey);
+    if (isQueenLandingHex(defender, cur) && curSteps > 0) {
+      const d = cubeDistance(cur, origin);
+      if (d < bestCenterDist) {
+        bestCenterDist = d;
+        best = cur;
+      }
+    }
+    for (const nbr of neighbors(cur)) {
+      const nk = hexKey(nbr);
+      if (dist.has(nk))
+        continue;
+      const tile = tileByKey.get(nk);
+      if (tile) {
+        if (!isQueenLandingHex(defender, nbr))
+          continue;
+      } else if (cubeDistance(nbr, origin) > maxVoidReach) {
+        continue;
+      }
+      dist.set(nk, curSteps + 1);
+      q.push(nbr);
+    }
+  }
+  return best;
+}, "pickIngressLandableOnCorridor");
+var hasVoidIngressPath = /* @__PURE__ */ __name((defender, from, to) => {
+  const tileByKey = new Map(defender.tiles.map((t) => [hexKey(t.hex), t]));
+  const isVoid = /* @__PURE__ */ __name((h) => !tileByKey.has(hexKey(h)), "isVoid");
+  const seen = /* @__PURE__ */ new Set();
+  const q = [];
+  for (const n of neighbors(from)) {
+    if (!isVoid(n))
+      continue;
+    const nk = hexKey(n);
+    seen.add(nk);
+    q.push(n);
+  }
+  const maxVoidReach = defender.tiles.reduce((m, t) => Math.max(m, cubeDistance(t.hex, hex(0, 0))), 0) + 4;
+  let steps = 0;
+  while (q.length > 0 && steps < 512) {
+    steps++;
+    const cur = q.shift();
+    if (hexEquals(cur, to))
+      return true;
+    for (const nbr of neighbors(cur)) {
+      if (hexEquals(nbr, to))
+        return true;
+      const nk = hexKey(nbr);
+      if (seen.has(nk) || !isVoid(nbr))
+        continue;
+      if (cubeDistance(nbr, hex(0, 0)) > maxVoidReach)
+        continue;
+      seen.add(nk);
+      q.push(nbr);
+    }
+  }
+  return false;
+}, "hasVoidIngressPath");
 var buildPlayer = /* @__PURE__ */ __name((id) => {
   const tiles = [];
   for (const h of range(hex(0, 0), HIVE_RADIUS)) {
@@ -503,7 +670,7 @@ var petalAt = /* @__PURE__ */ __name((patches, h) => {
   return null;
 }, "petalAt");
 var removePetal = /* @__PURE__ */ __name((patches, patchId, petalHex) => patches.map((p) => p.id === patchId ? { ...p, petals: p.petals.filter((pt) => !hexEquals(pt.hex, petalHex)) } : p).filter((p) => p.petals.length > 0), "removePetal");
-var buildInitialWorld = /* @__PURE__ */ __name((rng, ids = { selfId: "self", opponentId: "opponent" }) => ({
+var buildInitialWorld = /* @__PURE__ */ __name((rng, ids = { selfId: "self", opponentId: "opponent" }, config = {}) => ({
   t: 0,
   phase: "playing",
   self: buildPlayer(ids.selfId),
@@ -514,6 +681,10 @@ var buildInitialWorld = /* @__PURE__ */ __name((rng, ids = { selfId: "self", opp
   aiPlaceCooldown: AI_PLACE_BASE,
   aiPhantomCooldown: AI_PHANTOM_BASE,
   aiCarpenterCooldown: AI_CARPENTER_BASE,
+  aiDifficulty: config.aiDifficulty ?? "medium",
+  aiActionDelay: 0,
+  aiWorkerHoldHex: null,
+  aiWorkerHoldElapsed: 0,
   winner: null,
   log: []
 }), "buildInitialWorld");
@@ -652,13 +823,10 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
         const defender = world[otherSide(side)];
         const f = bee.state.flight;
         const landing = bee.state.landingHex;
-        let desired = landing;
-        if (!isQueenLandingHex(defender, landing)) {
-          desired = pickQueenLandingHex(defender);
-          if (!desired) {
-            beesChanged = true;
-            continue;
-          }
+        const desired = pickQueenLandingHexWhileFlying(defender, landing, bee.state.attackSide, bee.state.approachVoidHexKeys) ?? landing;
+        if (!isQueenLandingHex(defender, desired)) {
+          beesChanged = true;
+          continue;
         }
         const needRetarget = !hexEquals(desired, landing) || !hexEquals(desired, f.to.hex);
         const nextState = needRetarget ? {
@@ -679,6 +847,46 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
     }
     if (bee.state.kind === "worker-flying-to-flower") {
       const target = bee.state.target;
+      const freedHere = (updatedPlayer.freedLetters ?? []).find((f) => hexEquals(f.hex, target));
+      if (freedHere) {
+        updatedPlayer = {
+          ...updatedPlayer,
+          freedLetters: (updatedPlayer.freedLetters ?? []).filter((f) => f.id !== freedHere.id)
+        };
+        const drop = pickEmptyStorage(updatedPlayer);
+        if (!drop) {
+          next = logEvent(next, {
+            t: next.t,
+            ownerId: player.id,
+            text: `storage full, ${freedHere.letter} lost`
+          });
+          remainingBees.push({
+            ...bee,
+            state: {
+              kind: "worker-returning",
+              flight: flight(sideHivePanel(side), target, sideHivePanel(side), hex(0, 0), next.t, FLIGHT_TIMES.tileToHive)
+            }
+          });
+        } else {
+          remainingBees.push({
+            ...bee,
+            state: {
+              kind: "worker-flying-to-door-carrying",
+              queue: bee.state.queue,
+              carrying: freedHere.letter,
+              dropTile: drop.hex,
+              flight: flight(sideHivePanel(side), target, sideHivePanel(side), hex(0, 0), next.t, FLIGHT_TIMES.tileToHive)
+            }
+          });
+          next = logEvent(next, {
+            t: next.t,
+            ownerId: player.id,
+            text: `${freedHere.letter} recovered`
+          });
+        }
+        beesChanged = true;
+        continue;
+      }
       const found = petalAt(updatedPatches, target);
       if (found) {
         updatedPatches = removePetal(updatedPatches, found.patch.id, target);
@@ -906,15 +1114,19 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
         };
         updatedPlayer = grantHoney(updatedPlayer, bonus);
         const summary = wordsLetters.map((w) => w.join("")).join(" + ");
-        const tag = crossesPriorCappedByWord.some(Boolean) ? " reuse!" : "";
+        const beeBloom = wordsLetters.some((letters) => isBeeRelatedWord(letters.join("")));
+        const reuseTag = crossesPriorCappedByWord.some(Boolean) ? " reuse!" : "";
+        const beeTag = beeBloom ? " pollen bloom!" : "";
         next = logEvent(next, {
           t: next.t,
           ownerId: player.id,
-          text: `${summary} +${bonus} \u{1F728}${tag}`
+          text: `${summary} +${bonus} \u{1F728}${reuseTag}${beeTag}`
         });
+        const wordLength = wordsLetters[0]?.length ?? 0;
+        const expansionBudget = beeBloom ? Number.POSITIVE_INFINITY : Math.max(0, wordLength - 2);
         const ownedAfter = new Set(updatedPlayer.tiles.map((t) => hexKey(t.hex)));
         const expansionTargets = /* @__PURE__ */ new Map();
-        for (const h of newlyCappedHexes) {
+        for (const h of allCappedHexes) {
           for (const n of neighbors(h)) {
             const nk = hexKey(n);
             if (ownedAfter.has(nk))
@@ -925,6 +1137,9 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
         const sortedExpansion = [...expansionTargets.values()].sort((a, b) => hexKey(a).localeCompare(hexKey(b)));
         const expansionChain = [];
         for (const target of sortedExpansion) {
+          if (Number.isFinite(expansionBudget) && expansionChain.length >= expansionBudget) {
+            break;
+          }
           const tk = hexKey(target);
           if (reservedCarpenterTargets.has(tk))
             continue;
@@ -1111,12 +1326,16 @@ var shortestQueenHopTowardHive = /* @__PURE__ */ __name((defender, from) => {
   }
   return best;
 }, "shortestQueenHopTowardHive");
+var HIVE_CENTER = hex(0, 0);
+var defenderHasHiveTile = /* @__PURE__ */ __name((player) => player.tiles.some((t) => t.state === "hive" && hexEquals(t.hex, HIVE_CENTER)), "defenderHasHiveTile");
+var queenBreachedDefender = /* @__PURE__ */ __name((defender, queenHex) => hexEquals(queenHex, HIVE_CENTER) || !defenderHasHiveTile(defender), "queenBreachedDefender");
 var destroyTile = /* @__PURE__ */ __name((player, h, t) => {
   const tile = player.tiles.find((x) => hexEquals(x.hex, h));
-  if (!tile || tile.state === "hive")
-    return player;
+  if (!tile)
+    return { player, hiveDestroyed: false };
+  const hiveDestroyed = tile.state === "hive";
   const nextTiles = player.tiles.filter((x) => !hexEquals(x.hex, h));
-  const freed = tile.letter !== null ? [
+  const freed = !hiveDestroyed && tile.letter !== null ? [
     ...player.freedLetters ?? [],
     {
       id: newId(),
@@ -1126,8 +1345,21 @@ var destroyTile = /* @__PURE__ */ __name((player, h, t) => {
       witherAt: t + FREED_LETTER_LIFETIME_SECONDS
     }
   ] : player.freedLetters ?? [];
-  return { ...player, tiles: nextTiles, freedLetters: freed };
+  return {
+    player: { ...player, tiles: nextTiles, freedLetters: freed },
+    hiveDestroyed
+  };
 }, "destroyTile");
+var finishQueenBreach = /* @__PURE__ */ __name((world, attackerSide, attacker, defenderSide, defender, bees) => {
+  let next = setPlayer(world, defenderSide, defender);
+  next = setPlayer(next, attackerSide, { ...attacker, bees: [...bees] });
+  next = logEvent(next, {
+    t: next.t,
+    ownerId: next[attackerSide].id,
+    text: `queen breached hive!`
+  });
+  return { ...next, phase: "over", winner: attackerSide };
+}, "finishQueenBreach");
 var tickQueens = /* @__PURE__ */ __name((world) => {
   let next = world;
   for (const side of ["self", "opponent"]) {
@@ -1149,19 +1381,18 @@ var tickQueens = /* @__PURE__ */ __name((world) => {
         continue;
       }
       const ch = bee.state.currentHex;
-      const tileHere = defender.tiles.find((t) => hexEquals(t.hex, ch));
-      if (tileHere?.state === "hive") {
-        next = logEvent(next, {
-          t: next.t,
-          ownerId: attacker.id,
-          text: `queen breached hive!`
-        });
-        return { ...next, phase: "over", winner: side };
+      if (queenBreachedDefender(defender, ch)) {
+        return finishQueenBreach(next, side, attacker, defenderSide, defender, bees);
       }
+      const tileHere = defender.tiles.find((t) => hexEquals(t.hex, ch));
       if (tileHere) {
         const nextDamage2 = (tileHere.damage ?? 0) + QUEEN_DAMAGE_PER_STRIKE;
         if (nextDamage2 >= hexHpForTile(tileHere)) {
-          defender = destroyTile(defender, ch, next.t);
+          const destroyed = destroyTile(defender, ch, next.t);
+          defender = destroyed.player;
+          if (destroyed.hiveDestroyed || queenBreachedDefender(defender, ch)) {
+            return finishQueenBreach(next, side, attacker, defenderSide, defender, bees);
+          }
           next = logEvent(next, {
             t: next.t,
             ownerId: attacker.id,
@@ -1187,6 +1418,9 @@ var tickQueens = /* @__PURE__ */ __name((world) => {
         });
         continue;
       }
+      if (queenBreachedDefender(defender, step)) {
+        return finishQueenBreach(next, side, attacker, defenderSide, defender, bees);
+      }
       const targetTile = defender.tiles.find((t) => hexEquals(t.hex, step));
       if (!targetTile) {
         bees.push({
@@ -1199,17 +1433,13 @@ var tickQueens = /* @__PURE__ */ __name((world) => {
         });
         continue;
       }
-      if (targetTile.state === "hive") {
-        next = logEvent(next, {
-          t: next.t,
-          ownerId: attacker.id,
-          text: `queen breached hive!`
-        });
-        return { ...next, phase: "over", winner: side };
-      }
       const nextDamage = (targetTile.damage ?? 0) + QUEEN_DAMAGE_PER_STRIKE;
       if (nextDamage >= hexHpForTile(targetTile)) {
-        defender = destroyTile(defender, step, next.t);
+        const destroyed = destroyTile(defender, step, next.t);
+        defender = destroyed.player;
+        if (destroyed.hiveDestroyed || queenBreachedDefender(defender, step)) {
+          return finishQueenBreach(next, side, attacker, defenderSide, defender, bees);
+        }
         next = logEvent(next, {
           t: next.t,
           ownerId: attacker.id,
@@ -1263,8 +1493,8 @@ var dispatchWorker = /* @__PURE__ */ __name((world, side, target) => {
   const cost = BEE_STATS.worker.honeyCost;
   if (player.honey < cost)
     return { ok: false, world, reason: "not enough honey" };
-  const flowerTarget = petalAt(world.patches, target);
   const freedTarget = (player.freedLetters ?? []).find((f) => hexEquals(f.hex, target));
+  const flowerTarget = freedTarget ? null : petalAt(world.patches, target);
   if (!flowerTarget && !freedTarget)
     return { ok: false, world, reason: "no letter here" };
   const emptyStorage = player.tiles.some((t) => t.state === "storage" && !t.letter);
@@ -1277,15 +1507,15 @@ var dispatchWorker = /* @__PURE__ */ __name((world, side, target) => {
     kind: "worker",
     ownerId: player.id,
     capacity: BEE_STATS.worker.capacity,
-    state: flowerTarget ? {
+    state: freedTarget ? {
+      kind: "worker-flying-to-freed",
+      target,
+      flight: flight(panel, hex(0, 0), panel, target, world.t, FLIGHT_TIMES.hiveToTile)
+    } : {
       kind: "worker-flying-to-flower",
       queue: [],
       target,
       flight: flight(panel, hex(0, 0), "flowers", target, world.t, FLIGHT_TIMES.hiveToFlower)
-    } : {
-      kind: "worker-flying-to-freed",
-      target,
-      flight: flight(panel, hex(0, 0), panel, target, world.t, FLIGHT_TIMES.hiveToTile)
     }
   };
   const updated = {
@@ -1338,6 +1568,8 @@ var dispatchQueen = /* @__PURE__ */ __name((world, side, opts) => {
       kind: "queen-flying",
       assaultPanel: enemyPanel,
       landingHex: landing,
+      approachVoidHexKeys: queenApproachVoidHexKeys(enemy, landing),
+      ...attackSide !== void 0 ? { attackSide } : {},
       expiresAt: world.t + FLIGHT_TIMES.queenToHive + QUEEN_ASSAULT_DURATION_SECONDS,
       flight: flight(ownerPanel, hex(0, 0), enemyPanel, landing, world.t, FLIGHT_TIMES.queenToHive)
     }
@@ -1397,6 +1629,9 @@ var trySubmitWord = /* @__PURE__ */ __name((world, side, paths) => {
     return { ok: false, world, reason: "not enough honey" };
   if (paths.length === 0)
     return { ok: false, world, reason: "no words submitted" };
+  if (paths.length !== 1) {
+    return { ok: false, world, reason: "one word per drone" };
+  }
   const seenSignatures = new Set(player.usedWordSignatures);
   const nextSignatures = [];
   for (const path of paths) {
@@ -1422,7 +1657,7 @@ var trySubmitWord = /* @__PURE__ */ __name((world, side, paths) => {
     seenSignatures.add(signature);
     nextSignatures.push(signature);
   }
-  const flightSeconds = FLIGHT_TIMES.cappingPerPath * paths.length;
+  const flightSeconds = FLIGHT_TIMES.cappingPerPath;
   const bee = {
     id: newId(),
     kind: "drone",
@@ -1658,7 +1893,7 @@ var createGameLoop = /* @__PURE__ */ __name((opts, port) => {
     }
     const result = applyCommand(world, player.side, {
       kind: "submitWords",
-      paths: validPaths
+      paths: [validPaths[0]]
     });
     if (!result.ok) {
       ack(player.id, commandId, false, result.reason);
@@ -2045,7 +2280,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-j2IQrj/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-PS3vca/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -2077,7 +2312,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-j2IQrj/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-PS3vca/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;

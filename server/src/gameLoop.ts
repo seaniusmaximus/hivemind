@@ -218,9 +218,10 @@ export const createGameLoop = (
       ack(player.id, commandId, false, 'no valid words');
       return;
     }
+    // One word per drone — cap only the first valid path when several were sent.
     const result = applyCommand(world, player.side, {
       kind: 'submitWords',
-      paths: validPaths,
+      paths: [validPaths[0]!],
     });
     if (!result.ok) {
       ack(player.id, commandId, false, result.reason);
