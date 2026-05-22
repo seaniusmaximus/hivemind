@@ -22,6 +22,7 @@ import {
   type GamePhase,
   type Hex,
   type Letter,
+  type PlayerState,
   type PlayerSummary,
   type QueenAttackSide,
   type ServerMessage,
@@ -272,11 +273,17 @@ const reseed = (seed: number) => {
  * expects. AI cooldowns are zeroed — they only drive the solo dummy AI, which
  * never runs in online mode.
  */
+const normalizePlayer = (p: PlayerState): PlayerState => ({
+  ...p,
+  bestWord: p.bestWord ?? '',
+  bestWordScore: p.bestWordScore ?? 0,
+});
+
 const snapshotToWorld = (snap: WorldSnapshot): World => ({
   t: snap.t,
   phase: snap.phase,
-  self: snap.self,
-  opponent: snap.opponent,
+  self: normalizePlayer(snap.self),
+  opponent: normalizePlayer(snap.opponent),
   patches: snap.patches,
   patchCooldown: 0,
   aiWorkerCooldown: 0,
@@ -654,7 +661,9 @@ export const useGameStore = create<GameStore>((set, get) => {
 
   setDropHover: (h) => {
     set((s) => {
-      if (!s.letterDrag) return s;
+      if (!s.letterDrag) {
+        return s.dropHover === null ? s : { dropHover: null };
+      }
       if (h === null) return { dropHover: null };
       const tile = tileAt(s.world, 'self', h);
       const okSlot =
@@ -687,7 +696,11 @@ export const useGameStore = create<GameStore>((set, get) => {
     set({ letterDrag: null, dropHover: null });
   },
 
-  cancelLetterDrag: () => set({ letterDrag: null, dropHover: null }),
+  cancelLetterDrag: () => {
+    const s = get();
+    if (s.letterDrag === null && s.dropHover === null) return;
+    set({ letterDrag: null, dropHover: null });
+  },
 
   startDraft: (h) => {
     const s = get();

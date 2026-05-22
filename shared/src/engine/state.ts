@@ -7,7 +7,8 @@
  * Carpenters expand the hive *outward indefinitely* — any hex adjacent to your
  * active/letter/capped tiles is a "frontier" hex that can be activated. A
  * hold-to-send spends honey; capping a word with a drone also schedules one
- * free carpenter that visits up to (word length − 2) adjacent unowned hexes
+ * free carpenter that visits up to (word length − 2) adjacent unowned hexes.
+ * Honey for a capped word is the sum of its letter point values (see scoring).
  * around the capped word path (including reused tiles), in sequence (same
  * animation as a manual hold, no honey). The renderer
  * derives the frontier on the fly via
@@ -64,7 +65,7 @@ import {
   type Hex,
 } from '../hex.js';
 import { isBeeRelatedWord } from '../beeWords.js';
-import { honeyForCappedWord, wordScore } from '../scoring.js';
+import { honeyForCappedWord, recordBestWord, wordScore } from '../scoring.js';
 import { hexHpForTile, remainingHpForTile } from '../tileHp.js';
 import { tickSmartAi, type AiDifficulty } from './ai.js';
 
@@ -423,6 +424,8 @@ const buildPlayer = (id: string): PlayerState => {
     freedLetters: [],
     bees: [],
     usedWordSignatures: [],
+    bestWord: '',
+    bestWordScore: 0,
   };
 };
 
@@ -1233,6 +1236,13 @@ const resolveSideBees = (world: World, side: Side): World => {
           }),
         };
         updatedPlayer = grantHoney(updatedPlayer, bonus);
+        for (let wi = 0; wi < wordsLetters.length; wi++) {
+          updatedPlayer = recordBestWord(
+            updatedPlayer,
+            wordsLetters[wi]!,
+            crossesPriorCappedByWord[wi] ?? false,
+          );
+        }
         const summary = wordsLetters.map((w) => w.join('')).join(' + ');
         const beeBloom = wordsLetters.some((letters) =>
           isBeeRelatedWord(letters.join('')),

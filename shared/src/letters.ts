@@ -1,6 +1,15 @@
 /**
  * Standard Scrabble letter distribution and point values.
  * Total of 98 letters (we omit blanks — Hivemind has no wildcard mechanic).
+ *
+ * Point values (honey per letter when a word is capped):
+ * 1 — A E I O U L N S T R
+ * 2 — D G
+ * 3 — B C M P
+ * 4 — F H V W Y
+ * 5 — K
+ * 8 — J X
+ * 10 — Q Z
  */
 
 export type Letter =

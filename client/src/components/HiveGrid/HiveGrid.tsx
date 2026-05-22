@@ -16,6 +16,7 @@ import {
   hexHpForTile,
   hexKey,
   isAdjacent,
+  letterValue,
   queenAllowanceFor,
   remainingHpForTile,
   tileHasDraftableLetter,
@@ -191,9 +192,77 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
   const pendingLetterAnchorRef = useRef<Hex | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const tileByKeyRef = useRef(new Map<string, TileSnapshot>());
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
   zoomRef.current = zoom;
+
+  const resolveDropHoverFromPointer = useCallback((clientX: number, clientY: number): Hex | null => {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const hits = document.elementsFromPoint(clientX, clientY);
+    for (const el of hits) {
+      const path = el.closest<SVGPathElement>('.hex-tile[data-drop-target]');
+      if (!path || !svg.contains(path)) continue;
+      const key = path.dataset.hexKey;
+      if (!key) continue;
+      const tile = tileByKeyRef.current.get(key);
+      if (
+        !tile ||
+        tile.letter ||
+        (tile.state !== 'active' && tile.state !== 'storage')
+      ) {
+        continue;
+      }
+      return tile.hex;
+    }
+    return null;
+  }, []);
+
+  // Drop-hover must follow letter-drag state — never leave cyan highlights orphaned.
+  useEffect(() => {
+    if (!letterDrag) {
+      setDropHover(null);
+      if (dragModeRef.current === 'letter-move') dragModeRef.current = null;
+    }
+  }, [letterDrag, setDropHover]);
+
+  // Track drop target from pointer position (per-tile pointerleave is unreliable).
+  useEffect(() => {
+    if (!letterDrag || side !== 'self') return;
+
+    const syncHover = (e: PointerEvent) => {
+      if (!useGameStore.getState().letterDrag) {
+        setDropHover(null);
+        return;
+      }
+      setDropHover(resolveDropHoverFromPointer(e.clientX, e.clientY));
+    };
+
+    const clearHoverAndHolds = () => {
+      setDropHover(null);
+      cancelHold();
+      cancelWorkerHold();
+    };
+
+    window.addEventListener('pointermove', syncHover);
+    window.addEventListener('lostpointercapture', clearHoverAndHolds);
+    const svg = svgRef.current;
+    svg?.addEventListener('pointerleave', clearHoverAndHolds);
+    return () => {
+      window.removeEventListener('pointermove', syncHover);
+      window.removeEventListener('lostpointercapture', clearHoverAndHolds);
+      svg?.removeEventListener('pointerleave', clearHoverAndHolds);
+      setDropHover(null);
+    };
+  }, [
+    letterDrag,
+    side,
+    setDropHover,
+    resolveDropHoverFromPointer,
+    cancelHold,
+    cancelWorkerHold,
+  ]);
 
   // End any in-progress drag on pointer up anywhere in the document.
   useEffect(() => {
@@ -203,6 +272,8 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
         commitLetterDrag();
       } else if (dragModeRef.current === 'word-draft') {
         endDraft();
+      } else if (useGameStore.getState().letterDrag) {
+        cancelLetterDrag();
       }
       dragModeRef.current = null;
     };
@@ -210,6 +281,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
       pendingLetterAnchorRef.current = null;
       if (dragModeRef.current === 'letter-move') cancelLetterDrag();
       else if (dragModeRef.current === 'word-draft') endDraft();
+      else if (useGameStore.getState().letterDrag) cancelLetterDrag();
       dragModeRef.current = null;
     };
     window.addEventListener('pointerup', up);
@@ -446,6 +518,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
     }
     if (tile.state === 'capped') {
       dragModeRef.current = 'word-draft';
+      if (useGameStore.getState().letterDrag) cancelLetterDrag();
       startDraft(h);
       return;
     }
@@ -505,9 +578,6 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
     if (!interactive) return;
     cancelHold(h);
     cancelWorkerHold(h);
-    if (dragModeRef.current === 'letter-move' && dropHover && hexEquals(dropHover, h)) {
-      setDropHover(null);
-    }
   };
 
   const handlePointerUp = (h: Hex) => {
@@ -521,6 +591,8 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
   const draggingFromKey = letterDrag ? hexKey(letterDrag.fromHex) : null;
 
   const holdSeconds = HOLD_HINT_SECONDS;
+
+  tileByKeyRef.current = new Map(positioned.map((t) => [hexKey(t.hex), t]));
 
   return (
     <div className="grid-frame grid-frame--hive">
@@ -611,8 +683,9 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
                 data-draft-idx={draftIdx ?? undefined}
                 data-carpenter-eligible={isCarpenterEligible}
                 data-holding={isHeld}
-                data-drop-target={isDropTarget}
-                data-drop-hover={isDropHover}
+                data-hex-key={k}
+                data-drop-target={isDropTarget || undefined}
+                data-drop-hover={isDropHover || undefined}
                 data-interactive={interactiveTile}
                 data-reuse-level={reuseLevel}
                 data-hp={hp}
@@ -663,19 +736,30 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
                 </text>
               )}
               {t.letter && !hideLetter && (
-                <text
-                  className={
-                    t.state === 'storage'
-                      ? 'hex-letter storage-letter'
-                      : t.state === 'capped'
-                        ? 'hex-letter capped-letter'
-                        : 'hex-letter'
-                  }
-                  x={0}
-                  y={0}
-                >
-                  {t.letter}
-                </text>
+                <>
+                  <text
+                    className={
+                      t.state === 'storage'
+                        ? 'hex-letter storage-letter'
+                        : t.state === 'capped'
+                          ? 'hex-letter capped-letter'
+                          : 'hex-letter'
+                    }
+                    x={0}
+                    y={0}
+                  >
+                    {t.letter}
+                  </text>
+                  {t.state === 'storage' && (
+                    <text
+                      className="hex-letter-points storage-letter-points"
+                      x={0}
+                      y={tileSize * 0.52}
+                    >
+                      {letterValue(t.letter)}
+                    </text>
+                  )}
+                </>
               )}
               {floating && (
                 <text className="floating-letter" x={0} y={-14}>

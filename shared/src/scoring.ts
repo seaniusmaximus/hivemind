@@ -1,18 +1,9 @@
 import { letterValue, type Letter } from './letters.js';
+import type { PlayerState } from './messages.js';
 
-/** Length-based score multiplier. */
-export const lengthMultiplier = (length: number): number => {
-  if (length <= 4) return 1.0;
-  if (length <= 6) return 1.5;
-  if (length <= 8) return 2.0;
-  return 3.0;
-};
-
-/** Score for a single word. */
-export const wordScore = (word: readonly Letter[]): number => {
-  const base = word.reduce((sum, l) => sum + letterValue(l), 0);
-  return Math.round(base * lengthMultiplier(word.length));
-};
+/** Sum of per-letter point values for a word (no length multiplier). */
+export const wordScore = (word: readonly Letter[]): number =>
+  word.reduce((sum, l) => sum + letterValue(l), 0);
 
 /** Multiplier when a capping path includes at least one letter tile already in the `capped` state (branch / word-on-word). */
 export const BRANCH_REUSE_SCORE_MULTIPLIER = 1.5;
@@ -30,4 +21,19 @@ export const honeyForCappedWord = (
   return crossesPriorCappedLetter
     ? Math.round(base * BRANCH_REUSE_SCORE_MULTIPLIER)
     : base;
+};
+
+/** Update a player's match best if this capped word scored higher. */
+export const recordBestWord = (
+  player: PlayerState,
+  letters: readonly Letter[],
+  crossesPriorCappedLetter: boolean,
+): PlayerState => {
+  const score = honeyForCappedWord(letters, crossesPriorCappedLetter);
+  if (score <= player.bestWordScore) return player;
+  return {
+    ...player,
+    bestWord: letters.join(''),
+    bestWordScore: score,
+  };
 };

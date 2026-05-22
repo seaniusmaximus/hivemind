@@ -22,6 +22,7 @@ import {
   hex,
   hexEquals,
   hexKey,
+  letterValue,
   range,
   type FlowerPatch,
   type FlowerType,
@@ -251,6 +252,13 @@ export const FlowerField = () => {
                       />
                       <text className="hex-letter petal-letter" x={0} y={0}>
                         {petal.letter}
+                      </text>
+                      <text
+                        className="hex-letter-points petal-letter-points"
+                        x={0}
+                        y={PETAL_HEX_SIZE * 0.52}
+                      >
+                        {letterValue(petal.letter)}
                       </text>
                       {claimedBySelf && !isHeld && (
                         <path

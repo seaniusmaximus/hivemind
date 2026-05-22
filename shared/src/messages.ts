@@ -185,6 +185,9 @@ export interface PlayerState {
   /** Signatures for already-submitted word+hex patterns to prevent replaying
    *  the exact same word with the exact same tile letters. */
   readonly usedWordSignatures: readonly string[];
+  /** Highest-scoring word this player capped this match (honey paid at cap). */
+  readonly bestWord: string;
+  readonly bestWordScore: number;
 }
 
 export interface FreedLetter {
