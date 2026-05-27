@@ -162,6 +162,9 @@ export interface FlowerPatch {
   readonly spawnedAt: number;
   /** Total intended lifetime of the patch in seconds (informational). */
   readonly lifetimeSeconds: number;
+  /** Bonus patch from a pollen bloom; decays normally and is excluded from the
+   *  core 1-of-each-type field maintenance. */
+  readonly pollenBloom?: boolean;
 }
 
 /** Back-compat: a single pickable petal flattened for older consumers. */

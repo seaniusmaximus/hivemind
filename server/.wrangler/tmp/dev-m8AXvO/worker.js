@@ -330,18 +330,36 @@ var WORDS = buildSet();
 
 // ../shared/dist/beeWords.js
 var BEE_RELATED_WORDS_LIST = [
+  "HIVE",
+  "HIVES",
+  "FLOWER",
+  "FLOWERS",
+  "BEE",
+  "BEES",
   "QUEEN",
+  "QUEENS",
   "WORKER",
+  "WORKERS",
   "DRONE",
+  "DRONES",
   "CARPENTER",
+  "CARPENTERS",
   "SCOUT",
+  "SCOUTS",
   "APIARY",
+  "APIARIES",
   "HONEY",
+  "HONEYS",
   "BROOD",
+  "BROODS",
   "SWARM",
+  "SWARMS",
   "WAGGLE",
+  "WAGGLES",
   "COMB",
+  "COMBS",
   "HONEYCOMB",
+  "HONEYCOMBS",
   "WAX",
   "BEESWAX",
   "NECTAR",
@@ -350,7 +368,10 @@ var BEE_RELATED_WORDS_LIST = [
   "ANTENNAE",
   "PROBOSCIS",
   "WING",
+  "WINGED",
   "WINGS",
+  "EGG",
+  "EGGS",
   "LARVA",
   "LARVAE"
 ];
@@ -359,6 +380,7 @@ var isBeeRelatedWord = /* @__PURE__ */ __name((word) => BEE_RELATED_WORDS.has(wo
 
 // ../shared/dist/engine/state.js
 var HIVE_RADIUS = 2;
+var STORAGE_SLOT_COUNT = 6;
 var FIELD_RADIUS = 4;
 var PATCH_RESPAWN_SECONDS = 1.5;
 var PATCH_LIFETIME_SECONDS = 28;
@@ -615,8 +637,33 @@ var grantHoney = /* @__PURE__ */ __name((player, bonus) => ({
   honey: Math.min(honeyCapFor(player), player.honey + bonus)
 }), "grantHoney");
 var patchCenterCandidates = range(hex(0, 0), FIELD_RADIUS).filter((h) => neighbors(h).every((n) => ringIndex(n) <= FIELD_RADIUS));
-var spawnPatch = /* @__PURE__ */ __name((existing, type, rng, spawnedAt) => {
-  const free = patchCenterCandidates.filter((c) => existing.every((p) => cubeDistance(p.center, c) >= PATCH_MIN_CENTER_DISTANCE));
+var patchOccupiedHexKeys = /* @__PURE__ */ __name((patches) => {
+  const keys = /* @__PURE__ */ new Set();
+  for (const p of patches) {
+    keys.add(hexKey(p.center));
+    for (const pt of p.petals)
+      keys.add(hexKey(pt.hex));
+  }
+  return keys;
+}, "patchOccupiedHexKeys");
+var patchFitsWithoutOverlap = /* @__PURE__ */ __name((occupied, center) => {
+  if (occupied.has(hexKey(center)))
+    return false;
+  for (const h of neighbors(center)) {
+    if (occupied.has(hexKey(h)))
+      return false;
+  }
+  return true;
+}, "patchFitsWithoutOverlap");
+var freePatchCenters = /* @__PURE__ */ __name((existing, opts) => {
+  if (opts?.pollenBloom) {
+    const occupied = patchOccupiedHexKeys(existing);
+    return patchCenterCandidates.filter((c) => patchFitsWithoutOverlap(occupied, c));
+  }
+  return patchCenterCandidates.filter((c) => existing.every((p) => cubeDistance(p.center, c) >= PATCH_MIN_CENTER_DISTANCE));
+}, "freePatchCenters");
+var spawnPatch = /* @__PURE__ */ __name((existing, type, rng, spawnedAt, opts) => {
+  const free = freePatchCenters(existing, opts);
   if (free.length === 0)
     return null;
   const center = free[Math.floor(rng() * free.length)];
@@ -632,11 +679,60 @@ var spawnPatch = /* @__PURE__ */ __name((existing, type, rng, spawnedAt) => {
     center,
     petals,
     spawnedAt,
-    lifetimeSeconds: PATCH_LIFETIME_SECONDS
+    lifetimeSeconds: PATCH_LIFETIME_SECONDS,
+    ...opts?.pollenBloom ? { pollenBloom: true } : {}
   };
 }, "spawnPatch");
+var spawnSinglePetalBloom = /* @__PURE__ */ __name((existing, type, rng, spawnedAt) => {
+  const occupied = patchOccupiedHexKeys(existing);
+  const slots = [];
+  for (const center of patchCenterCandidates) {
+    if (occupied.has(hexKey(center)))
+      continue;
+    for (const petalHex of neighbors(center)) {
+      if (ringIndex(petalHex) > FIELD_RADIUS)
+        continue;
+      if (occupied.has(hexKey(petalHex)))
+        continue;
+      slots.push({ center, petal: petalHex });
+    }
+  }
+  if (slots.length === 0)
+    return null;
+  const pick = slots[Math.floor(rng() * slots.length)];
+  return {
+    id: newId(),
+    type,
+    center: pick.center,
+    petals: [
+      {
+        hex: pick.petal,
+        letter: drawFlowerLetter(type, rng),
+        witherAt: spawnedAt + PATCH_LIFETIME_SECONDS * (0.75 + rng() * 0.25) + (rng() - 0.5) * 1.2
+      }
+    ],
+    spawnedAt,
+    lifetimeSeconds: PATCH_LIFETIME_SECONDS,
+    pollenBloom: true
+  };
+}, "spawnSinglePetalBloom");
+var spawnPollenBloomPatches = /* @__PURE__ */ __name((existing, rng, spawnedAt) => {
+  const added = [];
+  let patches = [...existing];
+  for (const type of PATCH_TYPES) {
+    let fresh = spawnPatch(patches, type, rng, spawnedAt, { pollenBloom: true });
+    if (!fresh)
+      fresh = spawnSinglePetalBloom(patches, type, rng, spawnedAt);
+    if (!fresh)
+      continue;
+    patches = [...patches, fresh];
+    added.push(fresh);
+  }
+  return added;
+}, "spawnPollenBloomPatches");
+var corePatches = /* @__PURE__ */ __name((patches) => patches.filter((p) => !p.pollenBloom), "corePatches");
 var missingPatchTypes = /* @__PURE__ */ __name((patches) => {
-  const present = new Set(patches.map((p) => p.type));
+  const present = new Set(corePatches(patches).map((p) => p.type));
   return PATCH_TYPES.filter((t) => !present.has(t));
 }, "missingPatchTypes");
 var seedPatches = /* @__PURE__ */ __name((rng, t) => {
@@ -715,7 +811,7 @@ var tickWorld = /* @__PURE__ */ __name((world, dt, rng, opts = {}) => {
     self: tickHoney(world.self, dt),
     opponent: tickHoney(world.opponent, dt)
   };
-  next = resolveArrivedBees(next);
+  next = resolveArrivedBees(next, opts.clientPrediction ? void 0 : rng);
   next = tickQueens(next);
   next = tickFreedLetters(next);
   if (!opts.clientPrediction) {
@@ -778,14 +874,14 @@ function tileHasDraftableLetter(tile) {
   return !!tile?.letter && (tile.state === "capped" || tile.state === "letter" || tile.state === "active" && !!tile.letter);
 }
 __name(tileHasDraftableLetter, "tileHasDraftableLetter");
-var resolveArrivedBees = /* @__PURE__ */ __name((world) => {
+var resolveArrivedBees = /* @__PURE__ */ __name((world, rng) => {
   let next = world;
   for (const side of ["self", "opponent"]) {
-    next = resolveSideBees(next, side);
+    next = resolveSideBees(next, side, rng);
   }
   return next;
 }, "resolveArrivedBees");
-var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
+var resolveSideBees = /* @__PURE__ */ __name((world, side, rng) => {
   const player = world[side];
   let next = world;
   let updatedPlayer = player;
@@ -1113,6 +1209,12 @@ var resolveSideBees = /* @__PURE__ */ __name((world, side) => {
           ownerId: player.id,
           text: `${summary} +${bonus} \u{1F728}${reuseTag}${beeTag}`
         });
+        if (beeBloom && rng) {
+          const bloomPatches = spawnPollenBloomPatches(updatedPatches, rng, next.t);
+          if (bloomPatches.length > 0) {
+            updatedPatches = [...updatedPatches, ...bloomPatches];
+          }
+        }
         const wordLength = wordsLetters[0]?.length ?? 0;
         const expansionBudget = beeBloom ? Number.POSITIVE_INFINITY : Math.max(0, wordLength - 2);
         const ownedAfter = new Set(updatedPlayer.tiles.map((t) => hexKey(t.hex)));
@@ -1319,7 +1421,8 @@ var shortestQueenHopTowardHive = /* @__PURE__ */ __name((defender, from) => {
 }, "shortestQueenHopTowardHive");
 var HIVE_CENTER = hex(0, 0);
 var defenderHasHiveTile = /* @__PURE__ */ __name((player) => player.tiles.some((t) => t.state === "hive" && hexEquals(t.hex, HIVE_CENTER)), "defenderHasHiveTile");
-var queenBreachedDefender = /* @__PURE__ */ __name((defender, queenHex) => hexEquals(queenHex, HIVE_CENTER) || !defenderHasHiveTile(defender), "queenBreachedDefender");
+var defenderHasAllStorage = /* @__PURE__ */ __name((player) => player.tiles.filter((t) => t.state === "storage").length >= STORAGE_SLOT_COUNT, "defenderHasAllStorage");
+var queenBreachedDefender = /* @__PURE__ */ __name((defender, queenHex) => hexEquals(queenHex, HIVE_CENTER) || !defenderHasHiveTile(defender) || !defenderHasAllStorage(defender), "queenBreachedDefender");
 var destroyTile = /* @__PURE__ */ __name((player, h, t) => {
   const tile = player.tiles.find((x) => hexEquals(x.hex, h));
   if (!tile)
@@ -2271,7 +2374,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-RBYXgb/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-E5A7y5/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -2303,7 +2406,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-RBYXgb/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-E5A7y5/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;

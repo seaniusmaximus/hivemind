@@ -21,7 +21,8 @@ export const drainWordCapHoneyToasts = (
   prevLog: readonly ActivityEntry[],
   nextLog: readonly ActivityEntry[],
   selfId: string,
-  push: (payload: WordCapToastPayload) => void,
+  pushHive: (payload: WordCapToastPayload) => void,
+  pushFieldBloom?: () => void,
 ): void => {
   const prevIds = new Set(prevLog.map((e) => e.id));
   for (const e of nextLog) {
@@ -36,16 +37,17 @@ export const drainWordCapHoneyToasts = (
 
     const n = bonusMatch?.[1];
     if (pollen) {
-      push({
+      pushHive({
         text: n ? `Pollen bloom! +${n} 🜨` : 'Pollen bloom!',
         variant: 'alert',
         lifetimeMs: 2800,
       });
+      pushFieldBloom?.();
       continue;
     }
 
     const reuse = e.text.includes('reuse');
-    push({
+    pushHive({
       text: reuse ? `Word bonus +${n} 🜨 (reuse)` : `Word bonus +${n} 🜨`,
       variant: 'info',
       lifetimeMs: 2400,

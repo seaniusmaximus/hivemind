@@ -24,6 +24,7 @@ import {
   worldToSnapshot,
   PATCH_LIFETIME_SECONDS,
   PATCH_TARGET_COUNT,
+  POLLEN_BLOOM_PATCH_COUNT,
   type World,
 } from './state.js';
 
@@ -425,6 +426,41 @@ describe('engine: queen hive breach', () => {
     expect(after.phase).toBe('over');
     expect(after.winner).toBe('self');
   });
+
+  test('queen destroying a storage hex ends the game', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const storage = w0.opponent.tiles.find((t) => t.state === 'storage')!;
+    const queenBee = {
+      id: 'queen-test',
+      kind: 'queen' as const,
+      ownerId: w0.self.id,
+      capacity: 1,
+      state: {
+        kind: 'queen-assault' as const,
+        panel: 'opponent-hive' as const,
+        currentHex: storage.hex,
+        expiresAt: 100,
+        nextActionAt: 0,
+      },
+    };
+    const w: World = {
+      ...w0,
+      t: 1,
+      self: { ...w0.self, bees: [queenBee] },
+      opponent: {
+        ...w0.opponent,
+        tiles: w0.opponent.tiles.map((t) =>
+          hexEquals(t.hex, storage.hex) ? { ...t, damage: 0.75 } : t,
+        ),
+      },
+    };
+    const after = tickWorld(w, 0, fixedRng());
+    expect(after.phase).toBe('over');
+    expect(after.winner).toBe('self');
+    expect(after.opponent.tiles.some((t) => t.state === 'storage' && hexEquals(t.hex, storage.hex))).toBe(
+      false,
+    );
+  });
 });
 
 describe('engine: worker dispatch', () => {
@@ -535,8 +571,9 @@ describe('engine: flower patches', () => {
         const types = w.patches.map((p) => p.type).sort();
         expect(types).toEqual(['common', 'rare', 'vowel']);
       } else {
-        // Even mid-cooldown, no two patches of the same type should exist.
-        const types = w.patches.map((p) => p.type);
+        // Even mid-cooldown, no two core patches of the same type should exist.
+        const core = w.patches.filter((p) => !p.pollenBloom);
+        const types = core.map((p) => p.type);
         expect(new Set(types).size).toBe(types.length);
       }
     }
@@ -783,8 +820,17 @@ describe('engine: drone caps a placed word', () => {
     const submit = trySubmitWord(w, 'self', [path]);
     expect(submit.ok).toBe(true);
     if (!submit.ok) return;
+    const patchCountBefore = w.patches.length;
     const mid = advance(submit.world, 1.5, rng);
     expect(mid.log.some((e) => e.text.includes('pollen bloom'))).toBe(true);
+    expect(mid.patches.length).toBe(patchCountBefore + POLLEN_BLOOM_PATCH_COUNT);
+    expect(mid.patches.filter((p) => p.pollenBloom)).toHaveLength(POLLEN_BLOOM_PATCH_COUNT);
+    expect(
+      mid.patches
+        .filter((p) => p.pollenBloom)
+        .map((p) => p.type)
+        .sort(),
+    ).toEqual(['common', 'rare', 'vowel']);
     const carpenter = mid.self.bees.find((b) => b.kind === 'carpenter');
     expect(carpenter).toBeDefined();
     if (carpenter?.state.kind !== 'carpenter-flying') return;
@@ -813,6 +859,33 @@ describe('engine: drone caps a placed word', () => {
       if (touchesHive) eligibleNeighbors++;
     }
     expect(carpenter.capacity).toBe(eligibleNeighbors);
+  });
+
+  test('pollen bloom bonus patches wither and despawn without refilling the core field', () => {
+    const rng = fixedRng();
+    const path = [hex(0, -2), hex(1, -2), hex(2, -2), hex(2, -1), hex(1, -1)] as const;
+    const letters = ['Q', 'U', 'E', 'E', 'N'] as const;
+    let w = buildInitialWorld(rng);
+    w = {
+      ...w,
+      self: {
+        ...w.self,
+        honey: 30,
+        tiles: w.self.tiles.map((t) => {
+          const i = path.findIndex((h) => hexEquals(t.hex, h));
+          if (i >= 0) return { ...t, state: 'letter' as const, letter: letters[i]! };
+          return t;
+        }),
+      },
+    };
+    const submit = trySubmitWord(w, 'self', [path]);
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+    let cur = advance(submit.world, 1.5, rng);
+    expect(cur.patches.filter((p) => p.pollenBloom)).toHaveLength(POLLEN_BLOOM_PATCH_COUNT);
+    cur = advance(cur, PATCH_LIFETIME_SECONDS + 5, rng);
+    expect(cur.patches.filter((p) => p.pollenBloom)).toHaveLength(0);
+    expect(cur.patches.length).toBe(PATCH_TARGET_COUNT);
   });
 
   test('capping schedules one free carpenter that chains frontier hexes (no honey cost)', () => {

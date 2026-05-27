@@ -343,6 +343,14 @@ export const useGameStore = create<GameStore>((set, get) => {
         variant,
         lifetimeMs,
       });
+    }, () => {
+      get().pushToast({
+        text: 'pollen bloom',
+        panel: 'flowers',
+        hex: { q: 0, r: 0 },
+        variant: 'alert',
+        lifetimeMs: 2800,
+      });
     });
   };
 

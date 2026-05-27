@@ -13,14 +13,17 @@ describe('drainWordCapHoneyToasts', () => {
   beforeEach(() => resetWordCapHoneyToastSeen([]));
 
   it('shows pollen bloom toast for new bee-word cap lines', () => {
-    const pushed: string[] = [];
+    const hive: string[] = [];
+    const field: string[] = [];
     drainWordCapHoneyToasts(
       [],
       [entry('a', 'QUEEN +5 🜨 pollen bloom!')],
       'self',
-      (p) => pushed.push(p.text),
+      (p) => hive.push(p.text),
+      () => field.push('pollen bloom'),
     );
-    expect(pushed).toEqual(['Pollen bloom! +5 🜨']);
+    expect(hive).toEqual(['Pollen bloom! +5 🜨']);
+    expect(field).toEqual(['pollen bloom']);
   });
 
   it('shows word bonus for normal caps', () => {
@@ -31,13 +34,16 @@ describe('drainWordCapHoneyToasts', () => {
 
   it('ignores opponent lines and already-known ids', () => {
     const prev = [entry('old', 'HIVE +1 🜨', 'opponent')];
-    const pushed: string[] = [];
+    const hive: string[] = [];
+    const field: string[] = [];
     drainWordCapHoneyToasts(
       prev,
       [entry('new', 'QUEEN +5 🜨 pollen bloom!', 'self'), ...prev],
       'self',
-      (p) => pushed.push(p.text),
+      (p) => hive.push(p.text),
+      () => field.push('pollen bloom'),
     );
-    expect(pushed).toEqual(['Pollen bloom! +5 🜨']);
+    expect(hive).toEqual(['Pollen bloom! +5 🜨']);
+    expect(field).toEqual(['pollen bloom']);
   });
 });

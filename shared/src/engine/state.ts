@@ -14,12 +14,10 @@
  * derives the frontier on the fly via
  * {@link frontierFor}; the engine only stores tiles you actually own.
  *
- * Flower field: at any time exactly {@link PATCH_TARGET_COUNT} flower patches
- * bloom in the central field. Each patch is a six-petal arrangement around an
- * unused center hex (so each petal is a single pickable letter). Patches come
- * in three types — vowel / common / rare — and slowly wither: petals fall off
- * one by one until either bees collect them all or the patch is empty, at
- * which point a fresh patch spawns elsewhere.
+ * Flower field: at any time exactly {@link PATCH_TARGET_COUNT} core flower
+ * patches bloom in the central field (one vowel, one common, one rare). A
+ * pollen bloom from a bee-related word adds {@link POLLEN_BLOOM_PATCH_COUNT}
+ * bonus patches that decay normally but do not count toward that invariant.
  *
  * Workers and carpenters are dispatched directly via a hold-to-send gesture
  * on a target hex (the UI enforces the hold duration). Each hold spawns one
@@ -120,11 +118,15 @@ export type BuildInitialWorldConfig = {
 /** Initial radius of the player hive (rings 0..2 are seeded). Carpenters grow
  *  the hive outward beyond this without bound. */
 export const HIVE_RADIUS = 2;
+/** Letter-storage slots seeded at hive ring 1 in {@link buildPlayer}. */
+const STORAGE_SLOT_COUNT = 6;
 /** Radius of the central flower field. Larger than before to fit 3 patches
  *  (each is 7 hexes) with enough breathing room. */
 export const FIELD_RADIUS = 4;
 /** Number of flower patches alive in the field at any time. */
 export const PATCH_TARGET_COUNT = 3;
+/** Extra flower patches spawned when a bee-related word triggers pollen bloom. */
+export const POLLEN_BLOOM_PATCH_COUNT = 3;
 /** How long after a patch despawns before a new one can spawn. */
 export const PATCH_RESPAWN_SECONDS = 1.5;
 /** Total intended lifetime of a freshly spawned patch (seconds). */
@@ -509,22 +511,52 @@ const patchCenterCandidates: readonly Hex[] = range(hex(0, 0), FIELD_RADIUS).fil
   (h) => neighbors(h).every((n) => ringIndex(n) <= FIELD_RADIUS),
 );
 
+const patchOccupiedHexKeys = (patches: readonly FlowerPatch[]): Set<string> => {
+  const keys = new Set<string>();
+  for (const p of patches) {
+    keys.add(hexKey(p.center));
+    for (const pt of p.petals) keys.add(hexKey(pt.hex));
+  }
+  return keys;
+};
+
+const patchFitsWithoutOverlap = (occupied: ReadonlySet<string>, center: Hex): boolean => {
+  if (occupied.has(hexKey(center))) return false;
+  for (const h of neighbors(center)) {
+    if (occupied.has(hexKey(h))) return false;
+  }
+  return true;
+};
+
+const freePatchCenters = (
+  existing: readonly FlowerPatch[],
+  opts?: { readonly pollenBloom?: boolean },
+): readonly Hex[] => {
+  if (opts?.pollenBloom) {
+    const occupied = patchOccupiedHexKeys(existing);
+    return patchCenterCandidates.filter((c) => patchFitsWithoutOverlap(occupied, c));
+  }
+  return patchCenterCandidates.filter((c) =>
+    existing.every((p) => cubeDistance(p.center, c) >= PATCH_MIN_CENTER_DISTANCE),
+  );
+};
+
 /**
  * Spawn a single patch of the requested type at one of the available center
  * candidates. Returns null if every candidate is too close to an existing
  * patch (no room to bloom). Type is chosen by the caller so the field can
  * maintain its 1-of-each invariant; see {@link missingPatchTypes} and
- * {@link seedPatches}.
+ * {@link seedPatches}. Pollen-bloom patches use tighter non-overlapping
+ * placement so three can usually fit alongside the core field.
  */
 const spawnPatch = (
   existing: readonly FlowerPatch[],
   type: FlowerType,
   rng: () => number,
   spawnedAt: number,
+  opts?: { readonly pollenBloom?: boolean },
 ): FlowerPatch | null => {
-  const free = patchCenterCandidates.filter((c) =>
-    existing.every((p) => cubeDistance(p.center, c) >= PATCH_MIN_CENTER_DISTANCE),
-  );
+  const free = freePatchCenters(existing, opts);
   if (free.length === 0) return null;
   const center = free[Math.floor(rng() * free.length)]!;
   // Spread petal wither times across [0.45, 1.0] of lifetime in random order so
@@ -549,12 +581,74 @@ const spawnPatch = (
     petals,
     spawnedAt,
     lifetimeSeconds: PATCH_LIFETIME_SECONDS,
+    ...(opts?.pollenBloom ? { pollenBloom: true as const } : {}),
   };
 };
 
-/** Which of the three patch types are not currently present in the field. */
+/** One pickable petal when a full six-petal patch will not fit. */
+const spawnSinglePetalBloom = (
+  existing: readonly FlowerPatch[],
+  type: FlowerType,
+  rng: () => number,
+  spawnedAt: number,
+): FlowerPatch | null => {
+  const occupied = patchOccupiedHexKeys(existing);
+  const slots: { readonly center: Hex; readonly petal: Hex }[] = [];
+  for (const center of patchCenterCandidates) {
+    if (occupied.has(hexKey(center))) continue;
+    for (const petalHex of neighbors(center)) {
+      if (ringIndex(petalHex) > FIELD_RADIUS) continue;
+      if (occupied.has(hexKey(petalHex))) continue;
+      slots.push({ center, petal: petalHex });
+    }
+  }
+  if (slots.length === 0) return null;
+  const pick = slots[Math.floor(rng() * slots.length)]!;
+  return {
+    id: newId(),
+    type,
+    center: pick.center,
+    petals: [
+      {
+        hex: pick.petal,
+        letter: drawFlowerLetter(type, rng),
+        witherAt:
+          spawnedAt +
+          PATCH_LIFETIME_SECONDS * (0.75 + rng() * 0.25) +
+          (rng() - 0.5) * 1.2,
+      },
+    ],
+    spawnedAt,
+    lifetimeSeconds: PATCH_LIFETIME_SECONDS,
+    pollenBloom: true,
+  };
+};
+
+/** Spawn one bonus patch of each type for a pollen bloom. */
+const spawnPollenBloomPatches = (
+  existing: readonly FlowerPatch[],
+  rng: () => number,
+  spawnedAt: number,
+): readonly FlowerPatch[] => {
+  const added: FlowerPatch[] = [];
+  let patches = [...existing];
+  for (const type of PATCH_TYPES) {
+    let fresh = spawnPatch(patches, type, rng, spawnedAt, { pollenBloom: true });
+    if (!fresh) fresh = spawnSinglePetalBloom(patches, type, rng, spawnedAt);
+    if (!fresh) continue;
+    patches = [...patches, fresh];
+    added.push(fresh);
+  }
+  return added;
+};
+
+/** Core field patches — excludes pollen-bloom bonuses. */
+const corePatches = (patches: readonly FlowerPatch[]): readonly FlowerPatch[] =>
+  patches.filter((p) => !p.pollenBloom);
+
+/** Which of the three patch types are not currently present in the core field. */
 const missingPatchTypes = (patches: readonly FlowerPatch[]): FlowerType[] => {
-  const present = new Set(patches.map((p) => p.type));
+  const present = new Set(corePatches(patches).map((p) => p.type));
   return PATCH_TYPES.filter((t) => !present.has(t));
 };
 
@@ -710,7 +804,7 @@ export const tickWorld = (
     self: tickHoney(world.self, dt),
     opponent: tickHoney(world.opponent, dt),
   };
-  next = resolveArrivedBees(next);
+  next = resolveArrivedBees(next, opts.clientPrediction ? undefined : rng);
   next = tickQueens(next);
   next = tickFreedLetters(next);
   // Patch wither/spawn lives server-side in online mode — the snapshot will
@@ -810,15 +904,15 @@ export function tileHasDraftableLetter(
 
 // ---- Bee resolution --------------------------------------------------------
 
-const resolveArrivedBees = (world: World): World => {
+const resolveArrivedBees = (world: World, rng?: () => number): World => {
   let next = world;
   for (const side of ['self', 'opponent'] as const) {
-    next = resolveSideBees(next, side);
+    next = resolveSideBees(next, side, rng);
   }
   return next;
 };
 
-const resolveSideBees = (world: World, side: Side): World => {
+const resolveSideBees = (world: World, side: Side, rng?: () => number): World => {
   const player = world[side];
   let next = world;
   let updatedPlayer = player;
@@ -1254,6 +1348,12 @@ const resolveSideBees = (world: World, side: Side): World => {
           ownerId: player.id,
           text: `${summary} +${bonus} 🜨${reuseTag}${beeTag}`,
         });
+        if (beeBloom && rng) {
+          const bloomPatches = spawnPollenBloomPatches(updatedPatches, rng, next.t);
+          if (bloomPatches.length > 0) {
+            updatedPatches = [...updatedPatches, ...bloomPatches];
+          }
+        }
         // Auto-expand the frontier: one free carpenter chains adjacent hexes.
         // Bee-related words expand every eligible neighbor; otherwise up to (n − 2).
         const wordLength = wordsLetters[0]?.length ?? 0;
@@ -1525,9 +1625,14 @@ const HIVE_CENTER = hex(0, 0);
 const defenderHasHiveTile = (player: PlayerState): boolean =>
   player.tiles.some((t) => t.state === 'hive' && hexEquals(t.hex, HIVE_CENTER));
 
-/** Queen occupies the axial origin or the defender no longer has a hive tile. */
+const defenderHasAllStorage = (player: PlayerState): boolean =>
+  player.tiles.filter((t) => t.state === 'storage').length >= STORAGE_SLOT_COUNT;
+
+/** Queen reached the hive center, destroyed the hive tile, or smashed a storage slot. */
 const queenBreachedDefender = (defender: PlayerState, queenHex: Hex): boolean =>
-  hexEquals(queenHex, HIVE_CENTER) || !defenderHasHiveTile(defender);
+  hexEquals(queenHex, HIVE_CENTER) ||
+  !defenderHasHiveTile(defender) ||
+  !defenderHasAllStorage(defender);
 
 type DestroyTileResult = { readonly player: PlayerState; readonly hiveDestroyed: boolean };
 
