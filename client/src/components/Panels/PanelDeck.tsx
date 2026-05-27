@@ -143,6 +143,7 @@ export const PanelDeck = ({ children }: Props) => {
         <button
           type="button"
           className="panel-arrow panel-arrow-left"
+          data-tutorial-target="panel-arrow-left"
           aria-label={
             panel > 0 ? `go to ${PANEL_LABELS[panel - 1]}` : 'no previous panel'
           }
@@ -165,7 +166,7 @@ export const PanelDeck = ({ children }: Props) => {
           style={{ display: 'flex', width: '300%', height: '100%' }}
         >
           {children.map((child, i) => (
-            <div className="panel" key={i} role="tabpanel">
+            <div className="panel" key={i} role="tabpanel" data-panel-index={i}>
               {child}
             </div>
           ))}
@@ -173,6 +174,7 @@ export const PanelDeck = ({ children }: Props) => {
         <button
           type="button"
           className="panel-arrow panel-arrow-right"
+          data-tutorial-target="panel-arrow-right"
           aria-label={
             panel < 2 ? `go to ${PANEL_LABELS[panel + 1]}` : 'no next panel'
           }

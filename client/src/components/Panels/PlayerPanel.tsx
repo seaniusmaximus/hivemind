@@ -11,6 +11,7 @@ const SelfHiveHoneyLabel = () => {
   return (
     <p
       className="player-panel-honey-label"
+      data-tutorial-target="honey-label"
       aria-label={`Honey ${current} of ${cap}`}
     >
       {current}/{cap}🜨

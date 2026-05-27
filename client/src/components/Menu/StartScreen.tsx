@@ -12,6 +12,8 @@ const DIFFICULTY_LABEL: Record<AiDifficulty, string> = {
 export const StartScreen = () => {
   const soloDifficulty = useGameStore((s) => s.soloDifficulty);
   const setSoloDifficulty = useGameStore((s) => s.setSoloDifficulty);
+  const tutorialEnabled = useGameStore((s) => s.tutorialEnabled);
+  const setTutorialEnabled = useGameStore((s) => s.setTutorialEnabled);
   const startSolo = useGameStore((s) => s.startSolo);
   const netStatus = useGameStore((s) => s.net.status);
   const lastError = useGameStore((s) => s.net.lastError);
@@ -28,21 +30,45 @@ export const StartScreen = () => {
           </h2>
           <fieldset className="menu-difficulty">
             <legend className="menu-difficulty-legend">AI DIFFICULTY</legend>
-            <div className="menu-difficulty-options" role="radiogroup" aria-label="AI difficulty">
-              {AI_DIFFICULTIES.map((level) => (
-                <label key={level} className="menu-difficulty-option">
-                  <input
-                    type="radio"
-                    name="ai-difficulty"
-                    value={level}
-                    checked={soloDifficulty === level}
-                    onChange={() => setSoloDifficulty(level)}
-                  />
-                  <span>{DIFFICULTY_LABEL[level]}</span>
-                </label>
-              ))}
+            <div
+              className="menu-difficulty-options"
+              role="radiogroup"
+              aria-label="AI difficulty"
+              aria-disabled={tutorialEnabled || undefined}
+            >
+              {AI_DIFFICULTIES.map((level) => {
+                const locked = tutorialEnabled && level !== 'easy';
+                return (
+                  <label
+                    key={level}
+                    className="menu-difficulty-option"
+                    data-disabled={locked || undefined}
+                  >
+                    <input
+                      type="radio"
+                      name="ai-difficulty"
+                      value={level}
+                      checked={soloDifficulty === level}
+                      disabled={locked}
+                      onChange={() => setSoloDifficulty(level)}
+                    />
+                    <span>{DIFFICULTY_LABEL[level]}</span>
+                  </label>
+                );
+              })}
             </div>
+            {tutorialEnabled ? (
+              <p className="menu-difficulty-note">Tutorial uses easy AI only.</p>
+            ) : null}
           </fieldset>
+          <label className="menu-tutorial-toggle">
+            <input
+              type="checkbox"
+              checked={tutorialEnabled}
+              onChange={(e) => setTutorialEnabled(e.target.checked)}
+            />
+            <span>TUTORIAL WALKTHROUGH</span>
+          </label>
           <button
             type="button"
             className="lobby-button lobby-button-primary menu-play-button"

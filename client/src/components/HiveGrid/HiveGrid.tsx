@@ -603,7 +603,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
           hold a frontier tile {holdSeconds}s to build · {carpenterCost}🜨
         </p>
       )}
-      <div ref={canvasRef} className="hive-field-canvas hive-field-canvas--zoomable">
+      <div ref={canvasRef} className="hive-field-canvas hive-field-canvas--zoomable" data-tutorial-target="hive-grid">
         <svg
           ref={svgRef}
           className="hex-svg hex-svg--hive"
@@ -677,6 +677,13 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
                 d={hexPath(tileSize)}
                 className="hex-tile"
                 data-state={t.state}
+                data-tutorial-target={
+                  t.state === 'hive'
+                    ? 'hive-center'
+                    : t.state === 'storage'
+                      ? 'storage-ring'
+                      : undefined
+                }
                 data-uncapped-letter={t.state === 'active' && !!t.letter ? true : undefined}
                 data-filled={t.state === 'storage' && !!t.letter}
                 data-draft={drafted}

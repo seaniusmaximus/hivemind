@@ -41,6 +41,112 @@ import {
   type ConnectionStatus,
   type NetConnection,
 } from '../game/net/connection.js';
+import type { TutorialStepId } from '../game/tutorialSteps.js';
+
+const TUTORIAL_PREF_KEY = 'hivemind-tutorial';
+/** If no carpenter appears (edge case), still advance after this long. */
+const TUTORIAL_CARPENTER_WAIT_FALLBACK_MS = 5000;
+
+const readTutorialPref = (): boolean => {
+  try {
+    return localStorage.getItem(TUTORIAL_PREF_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
+
+const writeTutorialPref = (on: boolean): void => {
+  try {
+    localStorage.setItem(TUTORIAL_PREF_KEY, on ? '1' : '0');
+  } catch {
+    // Private mode / blocked storage — ignore.
+  }
+};
+
+const injectStorageLetters = (world: World, letters: readonly Letter[]): World => {
+  let i = 0;
+  const tiles = world.self.tiles.map((t) => {
+    if (t.state === 'storage' && !t.letter && i < letters.length) {
+      const letter = letters[i]!;
+      i += 1;
+      return { ...t, letter };
+    }
+    return t;
+  });
+  return { ...world, self: { ...world.self, tiles } };
+};
+
+const selfHasWorkerInFlight = (world: World): boolean =>
+  world.self.bees.some(
+    (b) =>
+      b.state.kind === 'worker-flying-to-flower' ||
+      b.state.kind === 'worker-flying-to-door-carrying' ||
+      b.state.kind === 'worker-flying-to-freed' ||
+      b.state.kind === 'worker-returning',
+  );
+
+const storageHasLetter = (world: World): boolean =>
+  world.self.tiles.some((t) => t.state === 'storage' && t.letter !== null);
+
+/** Matches {@link QueenSpawnButton} — spawn is allowed (not merely targeting). */
+const selfHasCappingBee = (world: World): boolean =>
+  world.self.bees.some((b) => b.state.kind === 'capping');
+
+const selfHasCarpenterBusy = (world: World): boolean =>
+  world.self.bees.some(
+    (b) =>
+      b.kind === 'carpenter' &&
+      (b.state.kind === 'carpenter-flying' || b.state.kind === 'carpenter-returning'),
+  );
+
+/** B, E, E capped on the comb after the drone finishes "bee". */
+const hasBeeWordCappedOnComb = (world: World): boolean => {
+  let b = 0;
+  let e = 0;
+  for (const t of world.self.tiles) {
+    if (t.state !== 'capped' || !t.letter) continue;
+    if (t.letter === 'B') b += 1;
+    else if (t.letter === 'E') e += 1;
+  }
+  return b >= 1 && e >= 2;
+};
+
+/** B, E, E, S capped after spelling "bees" with reused letters. */
+const hasBeesWordCappedOnComb = (world: World): boolean => {
+  let b = 0;
+  let e = 0;
+  let s = 0;
+  for (const t of world.self.tiles) {
+    if (t.state !== 'capped' || !t.letter) continue;
+    if (t.letter === 'B') b += 1;
+    else if (t.letter === 'E') e += 1;
+    else if (t.letter === 'S') s += 1;
+  }
+  return b >= 1 && e >= 2 && s >= 1;
+};
+
+/** B, E, E dragged from storage onto empty comb tiles (ready to swipe a word). */
+const hasBeeLettersOnComb = (world: World): boolean => {
+  let b = 0;
+  let e = 0;
+  for (const t of world.self.tiles) {
+    if (t.state === 'storage' || t.state === 'capped' || t.state === 'hive') continue;
+    if (t.state !== 'active' && t.state !== 'letter') continue;
+    if (!t.letter) continue;
+    if (t.letter === 'B') b += 1;
+    else if (t.letter === 'E') e += 1;
+  }
+  return b >= 1 && e >= 2;
+};
+
+const canSpawnQueenNow = (world: World): boolean => {
+  const self = world.self;
+  const allowance = queenAllowanceFor(self);
+  const activeQueens = activeQueenCountFor(self);
+  if (activeQueens >= allowance) return false;
+  if (self.tiles.length < QUEEN_MIN_OWNED_HEXES) return false;
+  return self.honey >= BEE_STATS.queen.honeyCost;
+};
 
 const padTilesForQueenMin = (player: World['self']): World['self'] => {
   let next = player;
@@ -166,6 +272,19 @@ interface GameStore {
    * {@link pickQueenLandingHex}.
    */
   queenTargeting: { readonly startedAt: number; readonly deadline: number } | null;
+
+  /** Title-screen preference: next solo match runs the guided tutorial. */
+  tutorialEnabled: boolean;
+  setTutorialEnabled: (on: boolean) => void;
+  /** True while a tutorial-guided solo match is in progress. */
+  tutorialActive: boolean;
+  tutorialStep: TutorialStepId | null;
+  /** When true, {@link tick} does not advance the simulation. */
+  tutorialPaused: boolean;
+  /** Set when resuming after {@link TutorialStepId} `3c-frontier-expand` to watch carpenters. */
+  tutorialCarpenterWaitStartedAt: number | null;
+  tutorialCarpenterSawBusy: boolean;
+  advanceTutorial: () => void;
 
   /** Dev/testing overlay toggled with `` ` `` or `?debug=1`. Actions only apply in solo mode. */
   debugMode: boolean;
@@ -372,8 +491,21 @@ export const useGameStore = create<GameStore>((set, get) => {
   setPanel: (panel) => set({ panel }),
 
   mode: 'menu',
-  soloDifficulty: 'medium',
-  setSoloDifficulty: (level) => set({ soloDifficulty: level }),
+  soloDifficulty: readTutorialPref() ? 'easy' : 'medium',
+  setSoloDifficulty: (level) => {
+    if (get().tutorialEnabled && level !== 'easy') return;
+    set({ soloDifficulty: level });
+  },
+  tutorialEnabled: readTutorialPref(),
+  setTutorialEnabled: (on) => {
+    writeTutorialPref(on);
+    set(on ? { tutorialEnabled: true, soloDifficulty: 'easy' } : { tutorialEnabled: false });
+  },
+  tutorialActive: false,
+  tutorialStep: null,
+  tutorialPaused: false,
+  tutorialCarpenterWaitStartedAt: null,
+  tutorialCarpenterSawBusy: false,
   net: { status: 'idle', lastError: null },
   room: null,
 
@@ -443,6 +575,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     reseed(seed ?? Date.now() & 0xffffffff);
     clearQueenTimer();
     const aiDifficulty = get().soloDifficulty;
+    const withTutorial = get().tutorialEnabled;
     set({
       world: buildInitialWorld(rng, undefined, { aiDifficulty }),
       wordDrafts: [],
@@ -452,7 +585,12 @@ export const useGameStore = create<GameStore>((set, get) => {
       lastError: null,
       toasts: [],
       queenTargeting: null,
-      panel: 1,
+      panel: withTutorial ? 0 : 1,
+      tutorialActive: withTutorial,
+      tutorialStep: withTutorial ? '1a-hive' : null,
+      tutorialPaused: withTutorial,
+      tutorialCarpenterWaitStartedAt: null,
+      tutorialCarpenterSawBusy: false,
     });
     resetWordCapHoneyToastSeen(get().world.log.map((e) => e.id));
   },
@@ -460,6 +598,53 @@ export const useGameStore = create<GameStore>((set, get) => {
   startSolo: (seed) => {
     get().initSolo(seed);
     set({ mode: 'solo' });
+  },
+
+  advanceTutorial: () => {
+    const step = get().tutorialStep;
+    if (!get().tutorialActive || !step) return;
+
+    switch (step) {
+      case '1a-hive':
+        set({ tutorialStep: '1b-flowers', tutorialPaused: true, panel: 1 });
+        break;
+      case '1b-flowers':
+        set({ tutorialStep: 'playing-collect-letter', tutorialPaused: false, panel: 1 });
+        break;
+      case '2a-storage':
+        set({ tutorialStep: 'playing-place-bee-letters', tutorialPaused: false, panel: 0 });
+        break;
+      case '3a-draft':
+        set({ tutorialStep: 'playing-spell-bee', tutorialPaused: false, panel: 0 });
+        break;
+      case '3b-pollen-bloom':
+        set({ tutorialStep: '3c-frontier-expand', tutorialPaused: true, panel: 0 });
+        break;
+      case '3c-frontier-expand':
+        set({
+          tutorialStep: 'waiting-carpenter-expand',
+          tutorialPaused: false,
+          panel: 0,
+          tutorialCarpenterWaitStartedAt: performance.now(),
+          tutorialCarpenterSawBusy: false,
+        });
+        break;
+      case '3d-reuse':
+        set({ tutorialStep: 'playing-spell-reuse', tutorialPaused: false, panel: 0 });
+        break;
+      case '3e-navigation':
+        set({ tutorialStep: 'waiting-queen-ready', tutorialPaused: false, panel: 0 });
+        break;
+      case '4a-queen':
+        set({
+          tutorialActive: false,
+          tutorialStep: 'complete',
+          tutorialPaused: false,
+        });
+        break;
+      default:
+        break;
+    }
   },
 
   enterMenu: () => {
@@ -480,6 +665,11 @@ export const useGameStore = create<GameStore>((set, get) => {
       dropHover: null,
       lastError: null,
       toasts: [],
+      tutorialActive: false,
+      tutorialStep: null,
+      tutorialPaused: false,
+      tutorialCarpenterWaitStartedAt: null,
+      tutorialCarpenterSawBusy: false,
     });
   },
 
@@ -487,6 +677,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     const prevLog = get().world.log;
     const selfId = get().world.self.id;
     set((s) => {
+      if (s.tutorialPaused) return s;
       if (s.mode === 'menu' || s.mode === 'lobby') return s;
       if (s.mode === 'online') {
         // Run the pure engine simulation locally for smooth bee animations
@@ -501,6 +692,56 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
       return { world: tickSolo(s.world, dt, rng) };
     });
+    const after = get();
+    if (after.tutorialActive && !after.tutorialPaused) {
+      const { tutorialStep, world } = after;
+      if (
+        tutorialStep === 'waiting-worker-return' &&
+        !selfHasWorkerInFlight(world) &&
+        storageHasLetter(world)
+      ) {
+        set({
+          world: injectStorageLetters(world, ['B', 'E', 'E']),
+          tutorialStep: '2a-storage',
+          tutorialPaused: true,
+          panel: 0,
+        });
+      } else if (
+        tutorialStep === 'waiting-bee-cap' &&
+        !selfHasCappingBee(world) &&
+        hasBeeWordCappedOnComb(world)
+      ) {
+        set({ tutorialStep: '3b-pollen-bloom', tutorialPaused: true, panel: 0 });
+      } else if (tutorialStep === 'waiting-carpenter-expand') {
+        const startedAt = after.tutorialCarpenterWaitStartedAt ?? performance.now();
+        const elapsed = performance.now() - startedAt;
+        if (selfHasCarpenterBusy(world)) {
+          if (!after.tutorialCarpenterSawBusy) {
+            set({ tutorialCarpenterSawBusy: true });
+          }
+        } else if (
+          after.tutorialCarpenterSawBusy ||
+          elapsed >= TUTORIAL_CARPENTER_WAIT_FALLBACK_MS
+        ) {
+          set({
+            world: injectStorageLetters(world, ['S']),
+            tutorialStep: '3d-reuse',
+            tutorialPaused: true,
+            panel: 0,
+            tutorialCarpenterWaitStartedAt: null,
+            tutorialCarpenterSawBusy: false,
+          });
+        }
+      } else if (
+        tutorialStep === 'waiting-bees-cap' &&
+        !selfHasCappingBee(world) &&
+        hasBeesWordCappedOnComb(world)
+      ) {
+        set({ tutorialStep: '3e-navigation', tutorialPaused: true, panel: 0 });
+      } else if (tutorialStep === 'waiting-queen-ready' && canSpawnQueenNow(world)) {
+        set({ tutorialStep: '4a-queen', tutorialPaused: true, panel: 0 });
+      }
+    }
     pushWordCapHoneyToastFromLog(prevLog, get().world.log, selfId);
   },
 
@@ -534,6 +775,15 @@ export const useGameStore = create<GameStore>((set, get) => {
     // `side === 'opponent'` and we don't want phantom popups from its misses.
     if (!r.ok && side === 'self') {
       get().pushToast({ text: r.reason, panel: 'flowers', hex: h, variant: 'error' });
+      return;
+    }
+    if (
+      r.ok &&
+      side === 'self' &&
+      get().tutorialActive &&
+      get().tutorialStep === 'playing-collect-letter'
+    ) {
+      set({ tutorialStep: 'waiting-worker-return' });
     }
   },
 
@@ -702,6 +952,14 @@ export const useGameStore = create<GameStore>((set, get) => {
       return;
     }
     set({ letterDrag: null, dropHover: null });
+    const after = get();
+    if (
+      after.tutorialActive &&
+      after.tutorialStep === 'playing-place-bee-letters' &&
+      hasBeeLettersOnComb(after.world)
+    ) {
+      set({ tutorialStep: '3a-draft', tutorialPaused: true, panel: 0 });
+    }
   },
 
   cancelLetterDrag: () => {
@@ -784,6 +1042,10 @@ export const useGameStore = create<GameStore>((set, get) => {
     }
 
     set({ submitting: true, lastError: null });
+    const pathUsedCapped = path.some((h) => {
+      const tile = tileAt(s0.world, 'self', h);
+      return tile?.state === 'capped';
+    });
     try {
       const r = get().applyCommand({ kind: 'submitWords', paths: [path] }, 'self');
       if (!r.ok) {
@@ -791,11 +1053,32 @@ export const useGameStore = create<GameStore>((set, get) => {
         toastAt(r.reason);
         return;
       }
-      set((s) => ({
-        wordDrafts: s.wordDrafts.slice(0, -1),
-        submitting: false,
-        lastError: null,
-      }));
+      const submittedWord = word;
+      set((s) => {
+        let tutorialStep = s.tutorialStep;
+        let tutorialPaused = s.tutorialPaused;
+        let world = s.world;
+        if (s.tutorialActive && tutorialStep === 'playing-spell-bee' && submittedWord === 'BEE') {
+          tutorialStep = 'waiting-bee-cap';
+          tutorialPaused = false;
+        } else if (
+          s.tutorialActive &&
+          tutorialStep === 'playing-spell-reuse' &&
+          pathUsedCapped &&
+          submittedWord === 'BEES'
+        ) {
+          tutorialStep = 'waiting-bees-cap';
+          tutorialPaused = false;
+        }
+        return {
+          world,
+          wordDrafts: s.wordDrafts.slice(0, -1),
+          submitting: false,
+          lastError: null,
+          tutorialStep,
+          tutorialPaused,
+        };
+      });
     } catch (err) {
       const msg = `submit failed: ${err instanceof Error ? err.message : String(err)}`;
       set({ submitting: false, lastError: msg });

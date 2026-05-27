@@ -195,7 +195,7 @@ export const FlowerField = () => {
           style={{ touchAction: 'none', WebkitTouchCallout: 'none' }}
           onContextMenu={(e) => e.preventDefault()}
         >
-          {patches.map((patch: FlowerPatch) => {
+          {patches.map((patch: FlowerPatch, patchIndex) => {
             const cp = axialToPixel(patch.center, HEX_SIZE);
             return (
               <g key={patch.id} className="flower-patch" data-type={patch.type}>
@@ -209,7 +209,7 @@ export const FlowerField = () => {
                     {TYPE_LABEL[patch.type]}
                   </text>
                 </g>
-                {patch.petals.map((petal) => {
+                {patch.petals.map((petal, petalIndex) => {
                   const pp = axialToPixel(petal.hex, HEX_SIZE);
                   const w = witherFactor(petal, engineT);
                   const scale = 1 - w * 0.35;
@@ -227,6 +227,9 @@ export const FlowerField = () => {
                       transform={`translate(${pp.x},${pp.y}) scale(${scale.toFixed(3)})`}
                       className="flower-petal"
                       data-type={patch.type}
+                      data-tutorial-target={
+                        patchIndex === 0 && petalIndex === 0 ? 'flower-petal' : undefined
+                      }
                       data-withering={w > 0.001}
                       data-holding={isHeld}
                       style={{ opacity: 1 - w * 0.55, cursor: 'pointer' }}

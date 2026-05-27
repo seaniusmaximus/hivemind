@@ -50,6 +50,7 @@ export const QueenSpawnButton = () => {
         type="button"
         className="queen-spawn-button"
         disabled={!canSpawn}
+        data-tutorial-target="queen-spawn"
         data-active={queensFull || !hiveLargeEnough || targeting}
         data-targeting={targeting || undefined}
         onClick={() => dispatchQueen('self')}

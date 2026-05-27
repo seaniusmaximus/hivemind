@@ -6,6 +6,7 @@ import { FlowerField } from './components/FlowerField/FlowerField.js';
 import { Hud } from './components/Hud/Hud.js';
 import { DebugHud } from './components/Hud/DebugHud.js';
 import { GameOver } from './components/Hud/GameOver.js';
+import { TutorialOverlay } from './components/Tutorial/TutorialOverlay.js';
 import { BeeOverlay } from './components/Bee/BeeOverlay.js';
 import { DragGhost } from './components/Bee/DragGhost.js';
 import { IncomingQueenWatcher } from './components/Toasts/IncomingQueenWatcher.js';
@@ -67,6 +68,7 @@ export const App = () => {
       <DragGhost />
       <IncomingQueenWatcher />
       <Toasts />
+      <TutorialOverlay />
       <GameOver />
       <div className="scanlines" aria-hidden />
     </div>
