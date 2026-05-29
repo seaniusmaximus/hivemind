@@ -7,6 +7,11 @@ import {
   AI_DIFFICULTIES,
   buildInitialWorld,
   frontierFor,
+  getPlayer,
+  joinIndexOf,
+  opponentSlotForJoinIndex,
+  setPlayerById,
+  type OpponentSlot,
   type AiDifficulty,
   hexEquals,
   hexKey,
@@ -63,7 +68,7 @@ const writeTutorialPref = (on: boolean): void => {
   }
 };
 
-const injectStorageLetters = (world: World, letters: readonly Letter[]): World => {
+const injectStorageLetters = (world: ClientWorld, letters: readonly Letter[]): ClientWorld => {
   let i = 0;
   const tiles = world.self.tiles.map((t) => {
     if (t.state === 'storage' && !t.letter && i < letters.length) {
@@ -73,10 +78,13 @@ const injectStorageLetters = (world: World, letters: readonly Letter[]): World =
     }
     return t;
   });
-  return { ...world, self: { ...world.self, tiles } };
+  return toClientWorld(
+    setPlayerById(world, world.self.id, { ...world.self, tiles }),
+    world.self.id,
+  );
 };
 
-const selfHasWorkerInFlight = (world: World): boolean =>
+const selfHasWorkerInFlight = (world: ClientWorld): boolean =>
   world.self.bees.some(
     (b) =>
       b.state.kind === 'worker-flying-to-flower' ||
@@ -85,14 +93,14 @@ const selfHasWorkerInFlight = (world: World): boolean =>
       b.state.kind === 'worker-returning',
   );
 
-const storageHasLetter = (world: World): boolean =>
+const storageHasLetter = (world: ClientWorld): boolean =>
   world.self.tiles.some((t) => t.state === 'storage' && t.letter !== null);
 
 /** Matches {@link QueenSpawnButton} — spawn is allowed (not merely targeting). */
-const selfHasCappingBee = (world: World): boolean =>
+const selfHasCappingBee = (world: ClientWorld): boolean =>
   world.self.bees.some((b) => b.state.kind === 'capping');
 
-const selfHasCarpenterBusy = (world: World): boolean =>
+const selfHasCarpenterBusy = (world: ClientWorld): boolean =>
   world.self.bees.some(
     (b) =>
       b.kind === 'carpenter' &&
@@ -100,7 +108,7 @@ const selfHasCarpenterBusy = (world: World): boolean =>
   );
 
 /** B, E, E capped on the comb after the drone finishes "bee". */
-const hasBeeWordCappedOnComb = (world: World): boolean => {
+const hasBeeWordCappedOnComb = (world: ClientWorld): boolean => {
   let b = 0;
   let e = 0;
   for (const t of world.self.tiles) {
@@ -112,7 +120,7 @@ const hasBeeWordCappedOnComb = (world: World): boolean => {
 };
 
 /** B, E, E, S capped after spelling "bees" with reused letters. */
-const hasBeesWordCappedOnComb = (world: World): boolean => {
+const hasBeesWordCappedOnComb = (world: ClientWorld): boolean => {
   let b = 0;
   let e = 0;
   let s = 0;
@@ -126,7 +134,7 @@ const hasBeesWordCappedOnComb = (world: World): boolean => {
 };
 
 /** B, E, E dragged from storage onto empty comb tiles (ready to swipe a word). */
-const hasBeeLettersOnComb = (world: World): boolean => {
+const hasBeeLettersOnComb = (world: ClientWorld): boolean => {
   let b = 0;
   let e = 0;
   for (const t of world.self.tiles) {
@@ -139,7 +147,7 @@ const hasBeeLettersOnComb = (world: World): boolean => {
   return b >= 1 && e >= 2;
 };
 
-const canSpawnQueenNow = (world: World): boolean => {
+const canSpawnQueenNow = (world: ClientWorld): boolean => {
   const self = world.self;
   const allowance = queenAllowanceFor(self);
   const activeQueens = activeQueenCountFor(self);
@@ -148,7 +156,7 @@ const canSpawnQueenNow = (world: World): boolean => {
   return self.honey >= BEE_STATS.queen.honeyCost;
 };
 
-const padTilesForQueenMin = (player: World['self']): World['self'] => {
+const padTilesForQueenMin = (player: PlayerState): PlayerState => {
   let next = player;
   while (next.tiles.length < QUEEN_MIN_OWNED_HEXES) {
     const f = frontierFor(next);
@@ -165,7 +173,51 @@ const padTilesForQueenMin = (player: World['self']): World['self'] => {
   return next;
 };
 
-export type PanelIndex = 0 | 1 | 2;
+export type PanelIndex = 0 | 1 | 2 | 3 | 4;
+
+/** Client view of the world: engine state plus viewer-relative player shortcuts. */
+export type ClientWorld = World & {
+  readonly self: PlayerState;
+  readonly opponents: readonly PlayerState[];
+  /** First rival (2-player compat). */
+  readonly opponent: PlayerState;
+};
+
+const isRivalEliminated = (world: ClientWorld, rivalId: string): boolean =>
+  world.eliminatedPlayerIds.includes(rivalId);
+
+const firstActiveRivalIndex = (world: ClientWorld): number => {
+  const i = world.opponents.findIndex((o) => !isRivalEliminated(world, o.id));
+  return i >= 0 ? i : 0;
+};
+
+const queenTargetRival = (world: ClientWorld, index: number): PlayerState | undefined => {
+  const rival = world.opponents[index];
+  if (!rival || isRivalEliminated(world, rival.id)) return undefined;
+  return rival;
+};
+
+const rivalSlotOrder = (world: World, selfId: string): readonly PlayerState[] => {
+  const slotOrder = ['right', 'above', 'below'] as const;
+  return world.playerIds
+    .filter((id) => id !== selfId)
+    .map((id) => ({ player: getPlayer(world, id), slot: opponentSlotForJoinIndex(joinIndexOf(world, id)) }))
+    .sort((a, b) => slotOrder.indexOf(a.slot) - slotOrder.indexOf(b.slot))
+    .map((r) => r.player);
+};
+
+const toClientWorld = (world: World, selfId: string, snap?: WorldSnapshot): ClientWorld => {
+  const self = snap ? snap.self : getPlayer(world, selfId);
+  const opponents = snap ? snap.opponents : rivalSlotOrder(world, selfId);
+  return {
+    ...world,
+    self,
+    opponents,
+    opponent: opponents[0] ?? self,
+  };
+};
+
+const wrapSoloWorld = (world: World): ClientWorld => toClientWorld(world, 'self');
 
 export interface LetterDrag {
   readonly fromHex: Hex;
@@ -220,11 +272,8 @@ export interface RoomState {
   readonly code: string;
   readonly phase: GamePhase;
   readonly players: readonly PlayerSummary[];
-  /** Set after `GAME_START` arrives. Identifies which player slot is us. */
   readonly selfId: string | null;
-  readonly opponentId: string | null;
-  /** Filled when the server emits `GAME_OVER`. The renderer surfaces this
-   *  as a result overlay; the user clicks through to leave the room. */
+  readonly playerIds: readonly string[] | null;
   readonly result: { readonly winnerId: string | null; readonly reason: 'queen' | 'forfeit' } | null;
 }
 
@@ -246,7 +295,16 @@ interface GameStore {
   net: NetState;
   room: RoomState | null;
 
-  world: World;
+  world: ClientWorld;
+  /** Index into `world.opponents` for mini-map tabs and queen targeting. */
+  selectedRivalIndex: number;
+  setSelectedRivalIndex: (index: number) => void;
+  /** Pick assault target inside the queen attack popup. */
+  setQueenTargetRivalIndex: (index: number) => void;
+  /** Advance rival mini-map tab without resetting the manual-pick cooldown. */
+  cycleRivalTab: () => void;
+  /** Timestamp of last manual rival tab pick (pauses auto-cycle). */
+  rivalTabManualUntil: number;
   /**
    * In-progress swipe paths and invalid words kept after release. A valid
    * word is sent on pointer-up (`tryAutoSubmitLastCompletedDraft`); the last
@@ -271,7 +329,12 @@ interface GameStore {
    * {@link QUEEN_TARGETING_MS} elapses without a pick the queen auto-fires via
    * {@link pickQueenLandingHex}.
    */
-  queenTargeting: { readonly startedAt: number; readonly deadline: number } | null;
+  queenTargeting: {
+    readonly startedAt: number;
+    readonly deadline: number;
+    /** Rival index in `world.opponents` chosen in the attack popup. */
+    readonly targetRivalIndex: number;
+  } | null;
 
   /** Title-screen preference: next solo match runs the guided tutorial. */
   tutorialEnabled: boolean;
@@ -398,31 +461,42 @@ const normalizePlayer = (p: PlayerState): PlayerState => ({
   bestWordScore: p.bestWordScore ?? 0,
 });
 
-const snapshotToWorld = (snap: WorldSnapshot): World => ({
-  t: snap.t,
-  phase: snap.phase,
-  self: normalizePlayer(snap.self),
-  opponent: normalizePlayer(snap.opponent),
-  patches: snap.patches,
-  patchCooldown: 0,
-  aiWorkerCooldown: 0,
-  aiPlaceCooldown: 0,
-  aiPhantomCooldown: 0,
-  aiCarpenterCooldown: 0,
-  aiDifficulty: 'medium',
-  aiActionDelay: 0,
-  aiWorkerHoldHex: null,
-  aiWorkerHoldElapsed: 0,
-  winner: snap.winner,
-  log: snap.log,
-});
+const snapshotToWorld = (snap: WorldSnapshot): ClientWorld => {
+  const playerIds = [snap.self.id, ...snap.opponents.map((o) => o.id)];
+  const players: Record<string, PlayerState> = {
+    [snap.self.id]: normalizePlayer(snap.self),
+    ...Object.fromEntries(snap.opponents.map((o) => [o.id, normalizePlayer(o)])),
+  };
+  const base: World = {
+    t: snap.t,
+    phase: snap.phase,
+    playerIds,
+    players,
+    activePlayerIds: playerIds.filter((id) => !snap.eliminatedPlayerIds.includes(id)),
+    eliminatedPlayerIds: snap.eliminatedPlayerIds,
+    winnerId: snap.winner === 'self' ? snap.self.id : null,
+    playerCount: snap.playerCount,
+    patches: snap.patches,
+    patchCooldown: 0,
+    aiWorkerCooldown: 0,
+    aiPlaceCooldown: 0,
+    aiPhantomCooldown: 0,
+    aiCarpenterCooldown: 0,
+    aiDifficulty: 'medium',
+    aiActionDelay: 0,
+    aiWorkerHoldHex: null,
+    aiWorkerHoldElapsed: 0,
+    log: snap.log,
+  };
+  return toClientWorld(base, snap.self.id, snap);
+};
 
-const tileAt = (world: World, side: Side, h: Hex): TileSnapshot | undefined =>
-  world[side].tiles.find((t) => hexEquals(t.hex, h));
+const tileAtSelf = (world: ClientWorld, h: Hex): TileSnapshot | undefined =>
+  world.self.tiles.find((t) => hexEquals(t.hex, h));
 
-const draftToWord = (world: World, side: Side, path: readonly Hex[]): string =>
+const draftToWord = (world: ClientWorld, path: readonly Hex[]): string =>
   path
-    .map((h) => tileAt(world, side, h)?.letter ?? '')
+    .map((h) => tileAtSelf(world, h)?.letter ?? '')
     .join('')
     .toUpperCase();
 
@@ -489,6 +563,26 @@ export const useGameStore = create<GameStore>((set, get) => {
   return {
   panel: 1,
   setPanel: (panel) => set({ panel }),
+  selectedRivalIndex: 0,
+  setSelectedRivalIndex: (index) =>
+    set({
+      selectedRivalIndex: index,
+      rivalTabManualUntil: performance.now() + 6000,
+    }),
+  setQueenTargetRivalIndex: (index) =>
+    set((s) => {
+      if (!s.queenTargeting) return s;
+      const rival = s.world.opponents[index];
+      if (!rival || isRivalEliminated(s.world, rival.id)) return s;
+      return { queenTargeting: { ...s.queenTargeting, targetRivalIndex: index } };
+    }),
+  cycleRivalTab: () =>
+    set((s) => {
+      const n = s.world.opponents.length;
+      if (n <= 1) return s;
+      return { selectedRivalIndex: (s.selectedRivalIndex + 1) % n };
+    }),
+  rivalTabManualUntil: 0,
 
   mode: 'menu',
   soloDifficulty: readTutorialPref() ? 'easy' : 'medium',
@@ -509,7 +603,7 @@ export const useGameStore = create<GameStore>((set, get) => {
   net: { status: 'idle', lastError: null },
   room: null,
 
-  world: buildInitialWorld(rng),
+  world: wrapSoloWorld(buildInitialWorld(rng)),
   wordDrafts: [],
   letterDrag: null,
   dropHover: null,
@@ -560,14 +654,10 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (!get().debugMode) return;
     if (get().mode !== 'solo') return;
     set((s) => {
-      const p = s.world[side];
+      const p = getPlayer(s.world, side);
       const nextHoney = Math.max(0, p.honey + delta);
-      return {
-        world: {
-          ...s.world,
-          [side]: { ...p, honey: nextHoney },
-        },
-      };
+      const base = setPlayerById(s.world, side, { ...p, honey: nextHoney });
+      return { world: toClientWorld(base, 'self') };
     });
   },
 
@@ -577,7 +667,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     const aiDifficulty = get().soloDifficulty;
     const withTutorial = get().tutorialEnabled;
     set({
-      world: buildInitialWorld(rng, undefined, { aiDifficulty }),
+      world: wrapSoloWorld(buildInitialWorld(rng, undefined, { aiDifficulty })),
       wordDrafts: [],
       letterDrag: null,
       dropHover: null,
@@ -688,9 +778,14 @@ export const useGameStore = create<GameStore>((set, get) => {
         // it locally with a desynced seed makes flowers visibly jitter as
         // the snapshot snaps them back). The solo AI is also skipped: the
         // server is the only thing allowed to dispatch the opponent.
-        return { world: tickWorld(s.world, dt, rng, { clientPrediction: true }) };
+        return {
+          world: toClientWorld(
+            tickWorld(s.world, dt, rng, { clientPrediction: true }),
+            s.world.self.id,
+          ),
+        };
       }
-      return { world: tickSolo(s.world, dt, rng) };
+      return { world: wrapSoloWorld(tickSolo(s.world, dt, rng)) };
     });
     const after = get();
     if (after.tutorialActive && !after.tutorialPaused) {
@@ -746,24 +841,25 @@ export const useGameStore = create<GameStore>((set, get) => {
   },
 
   applyCommand: (cmd, side = 'self') => {
-    // Always apply locally first — both for solo and as client-prediction in
-    // online mode. The next SNAPSHOT reconciles authoritative state.
     const prevLog = get().world.log;
     const selfId = get().world.self.id;
-    const r = engineApplyCommand(get().world, side, cmd);
+    const actorId =
+      side === 'self'
+        ? selfId
+        : side === 'opponent'
+          ? (get().world.opponents[0]?.id ?? 'opponent')
+          : side;
+    const r = engineApplyCommand(get().world, actorId, cmd);
     if (r.ok) {
-      if (side === 'self') playCommandSfx(cmd);
-      set({ world: r.world, lastError: null });
-      if (side === 'self') {
+      if (actorId === selfId) playCommandSfx(cmd);
+      set({ world: toClientWorld(r.world, selfId), lastError: null });
+      if (actorId === selfId) {
         pushWordCapHoneyToastFromLog(prevLog, get().world.log, selfId);
       }
     } else {
       set({ lastError: r.reason });
     }
-    // Only forward self-side commands the local engine accepted; opponents
-    // never originate commands from this client, and obvious local failures
-    // would just be re-rejected server-side.
-    if (r.ok && side === 'self' && get().mode === 'online' && conn) {
+    if (r.ok && actorId === selfId && get().mode === 'online' && conn) {
       conn.send({ type: 'COMMAND', commandId: newCommandId(), cmd });
     }
     return r;
@@ -839,13 +935,25 @@ export const useGameStore = create<GameStore>((set, get) => {
     clearQueenTimer();
     const startedAt = performance.now();
     const deadline = startedAt + QUEEN_TARGETING_MS;
-    set({ queenTargeting: { startedAt, deadline } });
+    const world = s.world;
+    const sel = world.opponents[s.selectedRivalIndex];
+    const targetRivalIndex =
+      sel && !isRivalEliminated(world, sel.id)
+        ? s.selectedRivalIndex
+        : firstActiveRivalIndex(world);
+    set({ queenTargeting: { startedAt, deadline, targetRivalIndex } });
     queenTargetingTimer = setTimeout(() => {
       queenTargetingTimer = null;
       // If targeting was cancelled or already confirmed, do nothing.
-      if (!get().queenTargeting) return;
+      const qt = get().queenTargeting;
+      if (!qt) return;
       set({ queenTargeting: null });
-      const r = get().applyCommand({ kind: 'dispatchQueen' }, 'self');
+      const rival = queenTargetRival(get().world, qt.targetRivalIndex);
+      if (!rival) return;
+      const r = get().applyCommand(
+        { kind: 'dispatchQueen', targetPlayerId: rival.id },
+        'self',
+      );
       if (!r.ok) {
         get().pushToast({
           text: r.reason,
@@ -859,10 +967,24 @@ export const useGameStore = create<GameStore>((set, get) => {
 
   confirmQueenAttackSide: (attackSide) => {
     const s = get();
-    if (!s.queenTargeting) return;
+    const qt = s.queenTargeting;
+    if (!qt) return;
+    const rival = queenTargetRival(s.world, qt.targetRivalIndex);
+    if (!rival) {
+      s.pushToast({
+        text: 'target eliminated',
+        panel: 'self-hive',
+        hex: { q: 0, r: 0 },
+        variant: 'error',
+      });
+      return;
+    }
     clearQueenTimer();
     set({ queenTargeting: null });
-    const r = get().applyCommand({ kind: 'dispatchQueen', attackSide }, 'self');
+    const r = get().applyCommand(
+      { kind: 'dispatchQueen', attackSide, targetPlayerId: rival.id },
+      'self',
+    );
     if (!r.ok) {
       get().pushToast({
         text: r.reason,
@@ -903,7 +1025,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
   startLetterDrag: (fromHex) => {
     set((s) => {
-      const tile = tileAt(s.world, 'self', fromHex);
+      const tile = tileAtSelf(s.world, fromHex);
       if (!tile?.letter) return s;
       if (tile.state === 'capped') return s;
       if (tile.state !== 'storage' && tile.state !== 'active' && tile.state !== 'letter') {
@@ -923,7 +1045,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         return s.dropHover === null ? s : { dropHover: null };
       }
       if (h === null) return { dropHover: null };
-      const tile = tileAt(s.world, 'self', h);
+      const tile = tileAtSelf(s.world, h);
       const okSlot =
         !!tile &&
         !tile.letter &&
@@ -970,7 +1092,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
   startDraft: (h) => {
     const s = get();
-    const tile = tileAt(s.world, 'self', h);
+    const tile = tileAtSelf(s.world, h);
     if (!tileHasDraftableLetter(tile)) return;
     set({
       wordDrafts: [...s.wordDrafts, [h]],
@@ -998,7 +1120,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       if (hexEquals(last, h)) return s;
       if (cur.some((d) => hexEquals(d, h))) return s;
       if (!isAdjacent(last, h)) return s;
-      const tile = tileAt(s.world, 'self', h);
+      const tile = tileAtSelf(s.world, h);
       if (!tileHasDraftableLetter(tile)) return s;
       return {
         wordDrafts: drafts.slice(0, idx).concat([[...cur, h]]),
@@ -1031,7 +1153,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     if (path.length < 2) return;
     if (s0.submitting) return;
 
-    const word = draftToWord(s0.world, 'self', path);
+    const word = draftToWord(s0.world, path);
     const anchor = path[0]!;
     const toastAt = (text: string) =>
       get().pushToast({ text, panel: 'self-hive', hex: anchor, variant: 'error' });
@@ -1043,7 +1165,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     set({ submitting: true, lastError: null });
     const pathUsedCapped = path.some((h) => {
-      const tile = tileAt(s0.world, 'self', h);
+      const tile = tileAtSelf(s0.world, h);
       return tile?.state === 'capped';
     });
     try {
@@ -1131,7 +1253,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         phase: 'lobby',
         players: [],
         selfId: s.room?.selfId ?? null,
-        opponentId: s.room?.opponentId ?? null,
+        playerIds: s.room?.playerIds ?? null,
         result: null,
       },
     }));
@@ -1181,7 +1303,7 @@ export const useGameStore = create<GameStore>((set, get) => {
             phase: msg.phase,
             players: msg.players,
             selfId: s.room?.selfId ?? null,
-            opponentId: s.room?.opponentId ?? null,
+            playerIds: s.room?.playerIds ?? null,
             result: s.room?.result ?? null,
           },
         }));
@@ -1194,7 +1316,7 @@ export const useGameStore = create<GameStore>((set, get) => {
             ? {
                 ...s.room,
                 selfId: msg.selfId,
-                opponentId: msg.opponentId,
+                playerIds: msg.playerIds,
                 phase: 'playing',
                 result: null,
               }
@@ -1203,7 +1325,7 @@ export const useGameStore = create<GameStore>((set, get) => {
                 phase: 'playing',
                 players: [],
                 selfId: msg.selfId,
-                opponentId: msg.opponentId,
+                playerIds: msg.playerIds,
                 result: null,
               },
           // Clear any stale UI from the solo session before snapshots land.

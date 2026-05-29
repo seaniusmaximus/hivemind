@@ -37,8 +37,11 @@ import {
   dispatchQueen,
   placeLetter,
   trySubmitWord,
+  getPlayer,
   type World,
 } from './state.js';
+
+const soloAiId = (world: World): string => world.playerIds[1] ?? 'opponent';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -528,7 +531,7 @@ const workerHoldTargetValid = (world: World, target: Hex): boolean => {
     p.petals.some((pt) => hexKey(pt.hex) === key),
   );
   if (petalLive) return true;
-  return (world.opponent.freedLetters ?? []).some(
+  return (getPlayer(world, soloAiId(world)).freedLetters ?? []).some(
     (f) => hexKey(f.hex) === key && f.witherAt > world.t,
   );
 };
@@ -580,7 +583,7 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
       }
     }
   } else if (aiWorkerCooldown <= 0) {
-    const ai = next.opponent;
+    const ai = getPlayer(next, soloAiId(next));
     const emptySlots = ai.tiles.filter((t) => t.state === 'storage' && !t.letter).length;
     const inflight = ai.bees.filter(
       (b) => b.state.kind === 'worker-flying-to-flower' ||
@@ -661,7 +664,7 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
 
   // ---- 2. Plan + Place: wait for storage to fill, plan a word, place ----
   if (aiPlanCooldown <= 0) {
-    const ai = next.opponent;
+    const ai = getPlayer(next, soloAiId(next));
     const filledSlots = ai.tiles.filter(
       (t) => t.state === 'storage' && t.letter !== null,
     );
@@ -698,7 +701,7 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
       } else {
         // No word plan found — dump letters near capped tiles as fallback
         for (const slot of filledSlots.slice(0, 2)) {
-          const target = pickPlacementTarget(next.opponent);
+          const target = pickPlacementTarget(getPlayer(next, soloAiId(next)));
           if (!target) break;
           const r = placeLetter(next, 'opponent', slot.hex, target.hex);
           if (r.ok) {
@@ -714,7 +717,7 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
 
   // ---- 3. Word: submit any valid word found on the board ----
   if (aiWordCooldown <= 0) {
-    const ai = next.opponent;
+    const ai = getPlayer(next, soloAiId(next));
     const hasDroneInFlight = ai.bees.some((b) => b.state.kind === 'capping');
     if (!hasDroneInFlight) {
       const candidate = findBestWord(ai);
@@ -731,7 +734,7 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
 
   // ---- 4. Carpenter: grow hive evenly ----
   if (aiCarpenterCooldown <= 0) {
-    const ai = next.opponent;
+    const ai = getPlayer(next, soloAiId(next));
     const pending = ai.bees.some(
       (b) => b.state.kind === 'carpenter-flying' || b.state.kind === 'carpenter-returning',
     );
@@ -749,7 +752,7 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
   }
 
   // ---- 5. Queen: attack when able ----
-  const ai = next.opponent;
+  const ai = getPlayer(next, soloAiId(next));
   const canQueen =
     ai.tiles.length >= QUEEN_MIN_OWNED_HEXES &&
     ai.honey >= BEE_STATS.queen.honeyCost &&

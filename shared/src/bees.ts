@@ -86,8 +86,18 @@ export const FLIGHT_TIMES = {
   queenToHive: 10,
 } as const;
 
+/** Rival hive panels positioned around the flower field. */
+export type OpponentHivePanel =
+  | 'opponent-hive'
+  | 'opponent-hive-right'
+  | 'opponent-hive-above'
+  | 'opponent-hive-below';
+
 /** Identifies which on-screen panel a bee waypoint lives in. */
-export type BeePanel = 'self-hive' | 'flowers' | 'opponent-hive';
+export type BeePanel = 'self-hive' | 'flowers' | OpponentHivePanel;
+
+/** Hive panel used for queen assault / capping on a defender's grid. */
+export type HiveAssaultPanel = 'self-hive' | OpponentHivePanel;
 
 export interface BeeWaypoint {
   readonly panel: BeePanel;
@@ -148,7 +158,7 @@ export type BeeState =
     }
   | {
       readonly kind: 'capping';
-      readonly panel: 'self-hive' | 'opponent-hive';
+      readonly panel: HiveAssaultPanel;
       /** One or more word paths capped by the same drone flight. */
       readonly paths: readonly (readonly Hex[])[];
       readonly startedAt: number;
@@ -157,7 +167,9 @@ export type BeeState =
   | {
       readonly kind: 'queen-flying';
       /** Final attack panel (defender side), used after the flight lands. */
-      readonly assaultPanel: 'self-hive' | 'opponent-hive';
+      readonly assaultPanel: HiveAssaultPanel;
+      /** Player id of the hive being assaulted. */
+      readonly defenderPlayerId: string;
       /** Hex on the defender's grid where the queen lands. */
       readonly landingHex: Hex;
       /** When set, in-flight retargeting stays on this attack side. */
@@ -170,7 +182,8 @@ export type BeeState =
     }
   | {
       readonly kind: 'queen-assault';
-      readonly panel: 'self-hive' | 'opponent-hive';
+      readonly panel: HiveAssaultPanel;
+      readonly defenderPlayerId: string;
       readonly currentHex: Hex;
       readonly expiresAt: number;
       readonly nextActionAt: number;

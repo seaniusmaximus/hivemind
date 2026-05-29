@@ -8,7 +8,7 @@
  * panels because they reference different grids.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   QUEEN_ACTION_INTERVAL_SECONDS,
   beeFlight,
@@ -52,7 +52,8 @@ const colorFor = (kind: string): string =>
 type QueenHop = {
   readonly from: Hex;
   readonly to: Hex;
-  readonly startMs: number;
+  /** Engine time when this hop's strike animation started. */
+  readonly hopStartT: number;
   /** Engine `nextActionAt` when this hop was keyed — advances each strike even if `currentHex` is unchanged. */
   readonly boundNextActionAt: number;
   /** First assault after flight: wind-up starts on the target hex (matches landing), not the synthetic `from` hex. */
@@ -87,7 +88,6 @@ const beeViewportVisual = (
   bee: Bee,
   t: number,
   queenAssaultHopById: Map<string, QueenHop>,
-  wallMs: number,
 ): BeeViewportVisual | null => {
   const flight = beeFlight(bee.state);
   if (flight) {
@@ -144,7 +144,7 @@ const beeViewportVisual = (
       hop = {
         from,
         to: cur,
-        startMs: wallMs,
+        hopStartT: t,
         boundNextActionAt: nextAt,
         ...(hadPriorHop ? {} : { landingLeadIn: true as const }),
       };
@@ -154,7 +154,7 @@ const beeViewportVisual = (
       hop = {
         from: outwardStrikeFromHex(cur),
         to: cur,
-        startMs: wallMs,
+        hopStartT: t,
         boundNextActionAt: nextAt,
         landingLeadIn: true,
       };
@@ -168,8 +168,10 @@ const beeViewportVisual = (
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const dist = Math.hypot(dx, dy);
-    const intervalMs = QUEEN_ACTION_INTERVAL_SECONDS * 1000;
-    const u = Math.min(1, Math.max(0, (wallMs - hop.startMs) / intervalMs));
+    const u = Math.min(
+      1,
+      Math.max(0, (t - hop.hopStartT) / QUEEN_ACTION_INTERVAL_SECONDS),
+    );
 
     if (dist < 0.75) {
       return { x: b.x, y: b.y, rotationDeg: 0 };
@@ -257,13 +259,28 @@ const carryingLetter = (bee: Bee): string | null => {
   return null;
 };
 
+/** Max gap before snapping display time to authoritative engine time (online snapshots). */
+const DISPLAY_T_SNAP_SEC = 0.28;
+
 export const BeeOverlay = () => {
-  const t = useGameStore((s) => s.world.t);
+  const engineT = useGameStore((s) => s.world.t);
   const selfBees = useGameStore((s) => s.world.self.bees);
-  const oppBees = useGameStore((s) => s.world.opponent.bees);
+  const opponents = useGameStore((s) => s.world.opponents);
+  const oppBees = useMemo(() => opponents.flatMap((o) => o.bees), [opponents]);
   const [, force] = useState(0);
   const rafRef = useRef(0);
   const queenAssaultHopRef = useRef(new Map<string, QueenHop>());
+  const displayTRef = useRef(engineT);
+
+  useEffect(() => {
+    if (engineT > displayTRef.current + DISPLAY_T_SNAP_SEC) {
+      displayTRef.current = engineT;
+    } else if (engineT < displayTRef.current) {
+      displayTRef.current = engineT;
+    }
+  }, [engineT]);
+
+  const t = displayTRef.current;
 
   // Re-measure on window resize and panel-deck transitions; cheaper than running
   // every animation frame, and the engine tick already triggers re-renders too.
@@ -275,9 +292,18 @@ export const BeeOverlay = () => {
 
   useEffect(() => subscribeRegistry(() => force((n) => (n + 1) % 1024)), []);
 
-  // Smooth re-render between engine ticks so bees don't appear to step.
+  // Smooth re-render between engine ticks; advance display time toward engine time.
   useEffect(() => {
+    let last = performance.now();
     const tick = () => {
+      const now = performance.now();
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      const target = useGameStore.getState().world.t;
+      let next = displayTRef.current + dt;
+      if (target > next + DISPLAY_T_SNAP_SEC) next = target;
+      if (target < next) next = target;
+      displayTRef.current = Math.min(target, next);
       force((n) => (n + 1) % 1024);
       rafRef.current = requestAnimationFrame(tick);
     };
@@ -286,7 +312,6 @@ export const BeeOverlay = () => {
   }, []);
 
   const bees: Bee[] = [...selfBees, ...oppBees];
-  const wallMs = performance.now();
   const hopMap = queenAssaultHopRef.current;
   for (const id of [...hopMap.keys()]) {
     if (!bees.some((b) => b.id === id && b.state.kind === 'queen-assault')) {
@@ -296,7 +321,7 @@ export const BeeOverlay = () => {
 
   const visuals = bees
     .map((bee) => {
-      const vis = beeViewportVisual(bee, t, queenAssaultHopRef.current, wallMs);
+      const vis = beeViewportVisual(bee, t, queenAssaultHopRef.current);
       return vis ? { bee, vis } : null;
     })
     .filter((v): v is { bee: Bee; vis: BeeViewportVisual } => v !== null);

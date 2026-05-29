@@ -5,9 +5,11 @@ import type { Bee } from './bees.js';
 /** ----- Engine + wire shared primitives ----- */
 
 /** Which side of the board a player or piece belongs to from one viewer's
- *  perspective. The server stores both sides absolutely; clients always see
- *  themselves as `'self'` regardless of who they are in the room. */
+ *  perspective. Retained for solo/2p helpers; multiplayer uses player ids. */
 export type Side = 'self' | 'opponent';
+
+/** Spatial position of a rival hive panel around the flower field. */
+export type OpponentSlot = 'right' | 'above' | 'below';
 
 /**
  * Cardinal approach for a queen assault, in the same pixel axes as
@@ -46,6 +48,8 @@ export type GameCommand =
       readonly kind: 'dispatchQueen';
       readonly target?: Hex;
       readonly attackSide?: QueenAttackSide;
+      /** Required when more than two players are active. */
+      readonly targetPlayerId?: string;
     }
   | { readonly kind: 'placeLetter'; readonly from: Hex; readonly to: Hex }
   | { readonly kind: 'submitWords'; readonly paths: readonly (readonly Hex[])[] };
@@ -76,8 +80,8 @@ export type ServerMessage =
       type: 'GAME_START';
       /** This client's player id (perspective: `self` in snapshots). */
       selfId: string;
-      /** The other player's id (perspective: `opponent` in snapshots). */
-      opponentId: string;
+      /** All player ids in join order (includes self). */
+      playerIds: readonly string[];
       /** RNG seed used by the authoritative engine. Clients echo this for
        *  any client-only random visuals so we don't desync. */
       seed: number;
@@ -128,9 +132,13 @@ export interface WorldSnapshot {
   readonly tick: number;
   readonly phase: WorldPhase;
   /** From the receiver's perspective. `'self'` means the receiver won. */
-  readonly winner: Side | null;
+  readonly winner: 'self' | null;
   readonly self: PlayerState;
-  readonly opponent: PlayerState;
+  /** Active rivals ordered by {@link OpponentSlot}: right, above, below. */
+  readonly opponents: readonly PlayerState[];
+  readonly opponentSlots: readonly OpponentSlot[];
+  readonly playerCount: number;
+  readonly eliminatedPlayerIds: readonly string[];
   readonly patches: readonly FlowerPatch[];
   readonly log: readonly ActivityEntry[];
 }

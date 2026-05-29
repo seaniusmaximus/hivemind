@@ -82,20 +82,23 @@ const WaitingRoom = () => {
   const room = useGameStore((s) => s.room)!;
   const sendReady = useGameStore((s) => s.sendReady);
   const [haveSentReady, setHaveSentReady] = useState(false);
-  const opponentPresent = room.players.length === 2;
-  const everyoneReady = opponentPresent && room.players.every((p) => p.ready);
+  const enoughPlayers = room.players.length >= 2;
+  const everyoneReady = enoughPlayers && room.players.every((p) => p.ready);
 
   return (
     <div className="lobby-card">
       <RoomCodeHeading code={room.code} />
+      <p className="lobby-hint">
+        {room.players.length}/4 players — game starts when all connected players are ready.
+      </p>
       <div className="lobby-roster">
-        {[0, 1].map((i) => {
+        {[0, 1, 2, 3].map((i) => {
           const p = room.players[i];
           if (!p) {
             return (
               <div key={i} className="lobby-roster-row" data-empty="true">
-                <span>...</span>
-                <span>waiting for opponent</span>
+                <span>Slot {i + 1}</span>
+                <span>waiting for player</span>
               </div>
             );
           }
@@ -115,7 +118,7 @@ const WaitingRoom = () => {
             setHaveSentReady(true);
             sendReady();
           }}
-          disabled={haveSentReady || !opponentPresent}
+          disabled={haveSentReady || !enoughPlayers}
         >
           {haveSentReady ? (everyoneReady ? 'STARTING...' : 'WAITING...') : 'READY'}
         </button>

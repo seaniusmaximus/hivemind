@@ -62,7 +62,9 @@ export const App = () => {
       <PanelDeck>
         <PlayerPanel />
         <FlowerField />
-        <HiveGrid side="opponent" />
+        <HiveGrid opponentIndex={0} />
+        <HiveGrid opponentIndex={1} />
+        <HiveGrid opponentIndex={2} />
       </PanelDeck>
       <BeeOverlay />
       <DragGhost />

@@ -11,16 +11,7 @@ import { useGameStore } from '../../state/gameStore.js';
 
 const MINI_HEX = 3.4;
 const EXPAND_HEX = 22;
-
-/** Pointy-top hex path centered at origin (same convention as the main hive SVG). */
-const hexPathD = (size: number): string => {
-  const points: string[] = [];
-  for (let i = 0; i < 6; i += 1) {
-    const angle = (Math.PI / 180) * (60 * i - 30);
-    points.push(`${(size * Math.cos(angle)).toFixed(2)},${(size * Math.sin(angle)).toFixed(2)}`);
-  }
-  return `M${points.join(' L')} Z`;
-};
+const RIVAL_TAB_CYCLE_MS = 2000;
 
 const RivalBoardSvg = ({
   tiles,
@@ -46,7 +37,14 @@ const RivalBoardSvg = ({
     return { vbW: halfWidth * 2, vbH: halfHeight * 2, paths: pathsInner };
   }, [tiles, hexSize, incomingQueenHexKeys]);
 
-  const d = hexPathD(hexSize);
+  const d = (() => {
+    const points: string[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const angle = (Math.PI / 180) * (60 * i - 30);
+      points.push(`${(hexSize * Math.cos(angle)).toFixed(2)},${(hexSize * Math.sin(angle)).toFixed(2)}`);
+    }
+    return `M${points.join(' L')} Z`;
+  })();
 
   return (
     <svg
@@ -81,21 +79,53 @@ const SIDE_LABEL: Record<QueenAttackSide, string> = {
 };
 
 export const OpponentBoardMini = () => {
-  const tiles = useGameStore((s) => s.world.opponent.tiles);
+  const opponents = useGameStore((s) => s.world.opponents);
+  const selectedRivalIndex = useGameStore((s) => s.selectedRivalIndex);
+  const setSelectedRivalIndex = useGameStore((s) => s.setSelectedRivalIndex);
+  const cycleRivalTab = useGameStore((s) => s.cycleRivalTab);
+  const rivalTabManualUntil = useGameStore((s) => s.rivalTabManualUntil);
+  const selfId = useGameStore((s) => s.world.self.id);
   const selfBees = useGameStore((s) => s.world.self.bees);
+  const queenTargeting = useGameStore((s) => s.queenTargeting);
+  const setQueenTargetRivalIndex = useGameStore((s) => s.setQueenTargetRivalIndex);
+  const confirmQueenAttackSide = useGameStore((s) => s.confirmQueenAttackSide);
+  const cancelQueenTargeting = useGameStore((s) => s.cancelQueenTargeting);
+  const eliminatedPlayerIds = useGameStore((s) => s.world.eliminatedPlayerIds);
+  const room = useGameStore((s) => s.room);
+
+  const rival = opponents[selectedRivalIndex] ?? opponents[0];
+  const attackTargetIndex = queenTargeting?.targetRivalIndex ?? selectedRivalIndex;
+  const attackRival = opponents[attackTargetIndex] ?? rival;
+  const rivalName =
+    room?.players.find((p) => p.id === rival?.id)?.name ??
+    rival?.id.slice(0, 6) ??
+    'Rival';
+
   const incomingQueenHexKeys = useMemo(() => {
     const keys = new Set<string>();
-    for (const b of selfBees) {
-      if (b.kind === 'queen' && b.state.kind === 'queen-flying') {
-        keys.add(hexKey(b.state.landingHex));
+    if (!rival) return keys;
+    for (const o of opponents) {
+      for (const b of o.bees) {
+        if (
+          b.kind === 'queen' &&
+          b.state.kind === 'queen-flying' &&
+          b.state.defenderPlayerId === selfId
+        ) {
+          keys.add(hexKey(b.state.landingHex));
+        }
       }
     }
     return keys;
-  }, [selfBees]);
-  const rivalHoney = useGameStore((s) => Math.floor(s.world.opponent.honey));
-  const queenTargeting = useGameStore((s) => s.queenTargeting);
-  const confirmQueenAttackSide = useGameStore((s) => s.confirmQueenAttackSide);
-  const cancelQueenTargeting = useGameStore((s) => s.cancelQueenTargeting);
+  }, [opponents, selfId, rival]);
+
+  useEffect(() => {
+    if (opponents.length <= 1) return;
+    const id = window.setInterval(() => {
+      if (performance.now() < rivalTabManualUntil) return;
+      cycleRivalTab();
+    }, RIVAL_TAB_CYCLE_MS);
+    return () => window.clearInterval(id);
+  }, [opponents.length, rivalTabManualUntil, cycleRivalTab]);
 
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -109,8 +139,17 @@ export const OpponentBoardMini = () => {
     [confirmQueenAttackSide],
   );
 
+  const tiles = rival?.tiles ?? [];
+
+  const attackRivalName =
+    room?.players.find((p) => p.id === attackRival?.id)?.name ??
+    attackRival?.id.slice(0, 6) ??
+    'Rival';
+  const attackTiles = attackRival?.tiles ?? [];
+
   const expandUi =
     queenTargeting &&
+    attackRival &&
     mounted &&
     createPortal(
       <div
@@ -127,18 +166,38 @@ export const OpponentBoardMini = () => {
         />
         <div className="rival-queen-expand-modal">
           <h3 id="rival-queen-expand-title" className="rival-queen-expand-title">
-            Choose attack side
+            Attack {attackRivalName}
           </h3>
+          {opponents.length > 1 ? (
+            <div className="rival-queen-expand-tabs" role="tablist" aria-label="Choose hive to attack">
+              {opponents.map((o, i) => {
+                const name = room?.players.find((p) => p.id === o.id)?.name ?? `Rival ${i + 1}`;
+                const eliminated = eliminatedPlayerIds.includes(o.id);
+                return (
+                  <button
+                    key={o.id}
+                    type="button"
+                    role="tab"
+                    className="rival-queen-expand-tab"
+                    aria-selected={i === attackTargetIndex}
+                    data-active={i === attackTargetIndex}
+                    disabled={eliminated}
+                    title={eliminated ? 'Eliminated — cannot target' : undefined}
+                    onClick={() => setQueenTargetRivalIndex(i)}
+                  >
+                    {name}
+                    {eliminated ? ' (out)' : ''}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
           <p className="rival-queen-expand-hint">
             The queen strikes the outermost hex on that edge of the rival hive.
           </p>
           <div className="rival-queen-expand-grid">
             <div className="rival-queen-expand-cell rival-queen-expand-cell--top">
-              <button
-                type="button"
-                className="rival-queen-side-btn"
-                onClick={() => onSide('top')}
-              >
+              <button type="button" className="rival-queen-side-btn" onClick={() => onSide('top')}>
                 {SIDE_LABEL.top}
               </button>
             </div>
@@ -152,7 +211,7 @@ export const OpponentBoardMini = () => {
               </button>
               <div className="rival-queen-expand-svg-wrap">
                 <RivalBoardSvg
-                  tiles={tiles}
+                  tiles={attackTiles}
                   hexSize={EXPAND_HEX}
                   className="rival-board-expand-svg"
                   incomingQueenHexKeys={incomingQueenHexKeys}
@@ -176,7 +235,11 @@ export const OpponentBoardMini = () => {
               </button>
             </div>
           </div>
-          <button type="button" className="rival-queen-expand-cancel ghost" onClick={() => cancelQueenTargeting()}>
+          <button
+            type="button"
+            className="rival-queen-expand-cancel ghost"
+            onClick={() => cancelQueenTargeting()}
+          >
             Cancel
           </button>
         </div>
@@ -193,12 +256,31 @@ export const OpponentBoardMini = () => {
     return () => window.removeEventListener('keydown', onKey);
   }, [queenTargeting, cancelQueenTargeting]);
 
+  if (!rival) return null;
+
   return (
     <div className="rival-board-mini" aria-label="Rival hive layout: gold is capped comb">
+      {opponents.length > 1 ? (
+        <div className="rival-board-mini-tabs" role="tablist">
+          {opponents.map((o, i) => (
+            <button
+              key={o.id}
+              type="button"
+              role="tab"
+              className="rival-board-mini-tab"
+              aria-selected={i === selectedRivalIndex}
+              data-active={i === selectedRivalIndex}
+              onClick={() => setSelectedRivalIndex(i)}
+            >
+              {room?.players.find((p) => p.id === o.id)?.name ?? `Rival ${i + 1}`}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="rival-board-mini-header">
-        <span className="rival-board-mini-label">Rival hive</span>
-        <span className="rival-board-mini-honey" aria-label={`Rival honey ${rivalHoney}`}>
-          {rivalHoney}🜨
+        <span className="rival-board-mini-label">{rivalName}</span>
+        <span className="rival-board-mini-honey" aria-label={`Rival honey ${Math.floor(rival.honey)}`}>
+          {Math.floor(rival.honey)}🜨
         </span>
       </div>
       <RivalBoardSvg

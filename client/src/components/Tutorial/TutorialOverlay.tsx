@@ -73,8 +73,11 @@ const measureTarget = (root: ParentNode, target: TutorialTarget): HighlightRect 
 
 const isGlobalTutorialTarget = (target: TutorialTarget): boolean =>
   target === 'queen-spawn' ||
+  target === 'panel-nav' ||
   target === 'panel-arrow-left' ||
-  target === 'panel-arrow-right';
+  target === 'panel-arrow-right' ||
+  target === 'panel-arrow-up' ||
+  target === 'panel-arrow-down';
 
 const measureHighlights = (
   targets: readonly TutorialTarget[],

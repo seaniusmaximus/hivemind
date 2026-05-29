@@ -1,12 +1,21 @@
 import {
   buildInitialWorld,
+  getPlayer,
   hex,
   makeRng,
+  secondPlayer,
+  setPlayerById,
   worldToSnapshot,
   type ClientMessage,
 } from '@hivemind/shared';
 import type { NetConnection } from '../game/net/connection.js';
-import { useGameStore } from './gameStore.js';
+import { useGameStore, type ClientWorld } from './gameStore.js';
+
+const patchClientSelf = (world: ClientWorld, self: ClientWorld['self']): ClientWorld => {
+  const base = setPlayerById(world, 'self', self);
+  const opp = secondPlayer(base);
+  return { ...base, self, opponents: world.opponents.length > 0 ? [opp, ...world.opponents.slice(1)] : [opp], opponent: opp };
+};
 
 describe('gameStore', () => {
   test('boots on the title screen until startSolo', () => {
@@ -48,7 +57,7 @@ describe('gameStore', () => {
 
   test('dispatchWorker reports an error when honey is short', () => {
     const store = useGameStore;
-    store.setState((s) => ({ world: { ...s.world, self: { ...s.world.self, honey: 0 } } }));
+    store.setState((s) => ({ world: patchClientSelf(s.world, { ...s.world.self, honey: 0 }) }));
     const petal = store.getState().world.patches[0]!.petals[0]!;
     store.getState().dispatchWorker(petal.hex);
     expect(store.getState().world.self.bees).toHaveLength(0);
@@ -87,17 +96,14 @@ describe('gameStore', () => {
     store.getState().startLetterDrag(storage.hex);
     expect(store.getState().letterDrag).toBeNull();
     store.setState((s) => ({
-      world: {
-        ...s.world,
-        self: {
-          ...s.world.self,
-          tiles: s.world.self.tiles.map((t) =>
-            t.hex.q === storage.hex.q && t.hex.r === storage.hex.r
-              ? { ...t, letter: 'A' as const }
-              : t,
-          ),
-        },
-      },
+      world: patchClientSelf(s.world, {
+        ...s.world.self,
+        tiles: s.world.self.tiles.map((t) =>
+          t.hex.q === storage.hex.q && t.hex.r === storage.hex.r
+            ? { ...t, letter: 'A' as const }
+            : t,
+        ),
+      }),
     }));
     store.getState().startLetterDrag(storage.hex);
     expect(store.getState().letterDrag?.letter).toBe('A');
@@ -106,18 +112,15 @@ describe('gameStore', () => {
   test('extendDraft adds adjacent ring-2 letter tiles and backtracks', () => {
     const store = useGameStore;
     store.setState((s) => ({
-      world: {
-        ...s.world,
-        self: {
-          ...s.world.self,
-          tiles: s.world.self.tiles.map((t) => {
-            if (t.hex.q === 0 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'C' };
-            if (t.hex.q === 1 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'A' };
-            if (t.hex.q === 2 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'T' };
-            return t;
-          }),
-        },
-      },
+      world: patchClientSelf(s.world, {
+        ...s.world.self,
+        tiles: s.world.self.tiles.map((t) => {
+          if (t.hex.q === 0 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'C' };
+          if (t.hex.q === 1 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'A' };
+          if (t.hex.q === 2 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'T' };
+          return t;
+        }),
+      }),
     }));
     store.getState().startDraft(hex(0, -2));
     store.getState().extendDraft(hex(1, -2));
@@ -130,20 +133,17 @@ describe('gameStore', () => {
   test('startDraft can begin multiple word paths', () => {
     const store = useGameStore;
     store.setState((s) => ({
-      world: {
-        ...s.world,
-        self: {
-          ...s.world.self,
-          tiles: s.world.self.tiles.map((t) => {
-            if (t.hex.q === 0 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'C' };
-            if (t.hex.q === 1 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'A' };
-            if (t.hex.q === 2 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'T' };
-            if (t.hex.q === -2 && t.hex.r === 0) return { ...t, state: 'letter', letter: 'B' };
-            if (t.hex.q === -1 && t.hex.r === 0) return { ...t, state: 'letter', letter: 'E' };
-            return t;
-          }),
-        },
-      },
+      world: patchClientSelf(s.world, {
+        ...s.world.self,
+        tiles: s.world.self.tiles.map((t) => {
+          if (t.hex.q === 0 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'C' };
+          if (t.hex.q === 1 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'A' };
+          if (t.hex.q === 2 && t.hex.r === -2) return { ...t, state: 'letter', letter: 'T' };
+          if (t.hex.q === -2 && t.hex.r === 0) return { ...t, state: 'letter', letter: 'B' };
+          if (t.hex.q === -1 && t.hex.r === 0) return { ...t, state: 'letter', letter: 'E' };
+          return t;
+        }),
+      }),
     }));
     store.getState().startDraft(hex(0, -2));
     store.getState().extendDraft(hex(1, -2));
@@ -202,7 +202,7 @@ describe('gameStore — net slice', () => {
     expect(room.players.map((p) => p.id)).toEqual(['p1', 'p2']);
   });
 
-  test('GAME_START switches to online mode and stores selfId/opponentId', () => {
+  test('GAME_START switches to online mode and stores selfId/playerIds', () => {
     const { conn } = makeFakeConn();
     useGameStore.getState()._setConnection(conn);
     useGameStore.getState()._handleServerMessage({
@@ -217,7 +217,7 @@ describe('gameStore — net slice', () => {
     useGameStore.getState()._handleServerMessage({
       type: 'GAME_START',
       selfId: 'p1',
-      opponentId: 'p2',
+      playerIds: ['p1', 'p2'],
       seed: 42,
       tickRate: 15,
       startedAt: 0,
@@ -225,7 +225,7 @@ describe('gameStore — net slice', () => {
     const s = useGameStore.getState();
     expect(s.mode).toBe('online');
     expect(s.room?.selfId).toBe('p1');
-    expect(s.room?.opponentId).toBe('p2');
+    expect(s.room?.playerIds).toEqual(['p1', 'p2']);
     expect(s.room?.phase).toBe('playing');
   });
 
@@ -236,7 +236,7 @@ describe('gameStore — net slice', () => {
     // Build an authoritative-looking world we can project as a snapshot.
     const authoritative = buildInitialWorld(makeRng(99), { selfId: 'p1', opponentId: 'p2' });
     const advanced = { ...authoritative, t: 12.5 };
-    const snap = worldToSnapshot(advanced, 'self', 7);
+    const snap = worldToSnapshot(advanced, 'p1', 7);
 
     useGameStore.getState()._handleServerMessage({ type: 'SNAPSHOT', tick: 7, world: snap });
     const w = useGameStore.getState().world;
@@ -251,7 +251,7 @@ describe('gameStore — net slice', () => {
     useGameStore.getState()._handleServerMessage({
       type: 'GAME_START',
       selfId: 'p1',
-      opponentId: 'p2',
+      playerIds: ['p1', 'p2'],
       seed: 1,
       tickRate: 15,
       startedAt: 0,
@@ -284,7 +284,7 @@ describe('gameStore — net slice', () => {
     useGameStore.getState()._handleServerMessage({
       type: 'GAME_START',
       selfId: 'p1',
-      opponentId: 'p2',
+      playerIds: ['p1', 'p2'],
       seed: 1,
       tickRate: 15,
       startedAt: 0,
@@ -303,7 +303,7 @@ describe('gameStore — net slice', () => {
     useGameStore.getState()._handleServerMessage({
       type: 'GAME_START',
       selfId: 'p1',
-      opponentId: 'p2',
+      playerIds: ['p1', 'p2'],
       seed: 1,
       tickRate: 15,
       startedAt: 0,

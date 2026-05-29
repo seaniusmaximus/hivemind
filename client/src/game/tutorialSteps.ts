@@ -8,8 +8,11 @@ export type TutorialTarget =
   | 'storage-ring'
   | 'hive-grid'
   | 'queen-spawn'
+  | 'panel-nav'
   | 'panel-arrow-right'
-  | 'panel-arrow-left';
+  | 'panel-arrow-left'
+  | 'panel-arrow-up'
+  | 'panel-arrow-down';
 
 export type TutorialStepId =
   | '1a-hive'
@@ -116,9 +119,9 @@ export const TUTORIAL_STEPS: Record<
   '3e-navigation': {
     id: '3e-navigation',
     panel: 0,
-    targets: ['panel-arrow-right', 'panel-arrow-left'],
+    targets: ['panel-nav'],
     body:
-      'Navigate between your Hive and the Flower Field by swiping or using the arrow buttons on the left and right of the screen.',
+      'Use the navigation pad in the top-right corner to move between your hive, the flower field, and rival hives. Left and right follow the middle row; up and down jump to rivals above and below when playing with three or four players.',
     sectionEnd: true,
   },
   '4a-queen': {

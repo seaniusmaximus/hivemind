@@ -75,6 +75,7 @@ import type {
   FlowerPatch,
   FreedLetter,
   GameCommand,
+  OpponentSlot,
   Petal,
   PlayerState,
   QueenAttackSide,
@@ -83,16 +84,25 @@ import type {
   WorldPhase,
   WorldSnapshot,
 } from '../messages.js';
+import type { HiveAssaultPanel, OpponentHivePanel } from '../bees.js';
 
-export type { ActivityEntry, QueenAttackSide, Side, WorldPhase } from '../messages.js';
+export type { ActivityEntry, OpponentSlot, QueenAttackSide, Side, WorldPhase } from '../messages.js';
+
+export const MAX_PLAYERS = 4;
 
 export interface World {
   readonly t: number;
   readonly phase: WorldPhase;
-  readonly self: PlayerState;
-  readonly opponent: PlayerState;
+  /** Fixed join-order roster for the match. */
+  readonly playerIds: readonly string[];
+  readonly players: Readonly<Record<string, PlayerState>>;
+  /** Players still in the match (not eliminated). */
+  readonly activePlayerIds: readonly string[];
+  readonly eliminatedPlayerIds: readonly string[];
+  readonly winnerId: string | null;
   readonly patches: readonly FlowerPatch[];
   readonly patchCooldown: number;
+  readonly playerCount: number;
   readonly aiWorkerCooldown: number;
   readonly aiPlaceCooldown: number;
   readonly aiPhantomCooldown: number;
@@ -105,13 +115,16 @@ export interface World {
   readonly aiWorkerHoldHex: Hex | null;
   /** Elapsed hold time toward {@link WORKER_HOLD_SECONDS} for {@link aiWorkerHoldHex}. */
   readonly aiWorkerHoldElapsed: number;
-  readonly winner: Side | null;
   readonly log: readonly ActivityEntry[];
 }
 
 export type BuildInitialWorldConfig = {
   readonly aiDifficulty?: AiDifficulty;
 };
+
+export type BuildInitialWorldIds =
+  | { readonly playerIds: readonly string[] }
+  | { readonly selfId: string; readonly opponentId: string };
 
 // ---- Constants -------------------------------------------------------------
 
@@ -123,10 +136,18 @@ const STORAGE_SLOT_COUNT = 6;
 /** Radius of the central flower field. Larger than before to fit 3 patches
  *  (each is 7 hexes) with enough breathing room. */
 export const FIELD_RADIUS = 4;
-/** Number of flower patches alive in the field at any time. */
+/** Base number of flower patches at 2 players; see {@link patchTargetForPlayers}. */
 export const PATCH_TARGET_COUNT = 3;
 /** Extra flower patches spawned when a bee-related word triggers pollen bloom. */
 export const POLLEN_BLOOM_PATCH_COUNT = 3;
+
+/** Scale core flower patch count with player count: 2p→3, 3p→4, 4p→5. */
+export const patchTargetForPlayers = (n: number): number =>
+  PATCH_TARGET_COUNT + Math.max(0, n - 2);
+
+/** Scale pollen-bloom bonus patches with player count. */
+export const pollenBloomPatchCountForPlayers = (n: number): number =>
+  POLLEN_BLOOM_PATCH_COUNT + Math.max(0, n - 2);
 /** How long after a patch despawns before a new one can spawn. */
 export const PATCH_RESPAWN_SECONDS = 1.5;
 /** Total intended lifetime of a freshly spawned patch (seconds). */
@@ -624,18 +645,22 @@ const spawnSinglePetalBloom = (
   };
 };
 
-/** Spawn one bonus patch of each type for a pollen bloom. */
+/** Spawn bonus patches for a pollen bloom (scaled by player count). */
 const spawnPollenBloomPatches = (
   existing: readonly FlowerPatch[],
   rng: () => number,
   spawnedAt: number,
+  playerCount: number,
 ): readonly FlowerPatch[] => {
+  const target = pollenBloomPatchCountForPlayers(playerCount);
   const added: FlowerPatch[] = [];
   let patches = [...existing];
-  for (const type of PATCH_TYPES) {
+  const types = [...PATCH_TYPES];
+  while (added.length < target) {
+    const type = types[added.length % types.length]!;
     let fresh = spawnPatch(patches, type, rng, spawnedAt, { pollenBloom: true });
     if (!fresh) fresh = spawnSinglePetalBloom(patches, type, rng, spawnedAt);
-    if (!fresh) continue;
+    if (!fresh) break;
     patches = [...patches, fresh];
     added.push(fresh);
   }
@@ -652,13 +677,51 @@ const missingPatchTypes = (patches: readonly FlowerPatch[]): FlowerType[] => {
   return PATCH_TYPES.filter((t) => !present.has(t));
 };
 
-/** Seed the initial field with one patch of each type, in canonical order. */
-const seedPatches = (rng: () => number, t: number): FlowerPatch[] => {
-  const result: FlowerPatch[] = [];
+/** How many core patches the field should maintain for the given player count. */
+const corePatchTarget = (patches: readonly FlowerPatch[], playerCount: number): number =>
+  patchTargetForPlayers(playerCount);
+
+/** Extra core patch types needed beyond the 1-of-each invariant. */
+const extraCorePatchTypesNeeded = (
+  patches: readonly FlowerPatch[],
+  playerCount: number,
+): FlowerType[] => {
+  const core = corePatches(patches);
+  const target = corePatchTarget(patches, playerCount);
+  if (core.length >= target) return [];
+  const missing = missingPatchTypes(patches);
+  if (missing.length > 0) return missing;
+  const counts = new Map<FlowerType, number>();
+  for (const t of PATCH_TYPES) counts.set(t, 0);
+  for (const p of core) counts.set(p.type, (counts.get(p.type) ?? 0) + 1);
+  const extras: FlowerType[] = [];
+  while (core.length + extras.length < target) {
+    let pick: FlowerType = PATCH_TYPES[0]!;
+    let min = counts.get(pick) ?? 0;
+    for (const t of PATCH_TYPES) {
+      const c = counts.get(t) ?? 0;
+      if (c < min) {
+        min = c;
+        pick = t;
+      }
+    }
+    extras.push(pick);
+    counts.set(pick, (counts.get(pick) ?? 0) + 1);
+  }
+  return extras;
+};
+
+/** Seed the initial field; maintains 1-of-each then fills to player-scaled quota. */
+const seedPatches = (rng: () => number, t: number, playerCount: number): FlowerPatch[] => {
+  let result: FlowerPatch[] = [];
   for (const type of PATCH_TYPES) {
     const p = spawnPatch(result, type, rng, t);
     if (!p) break;
     result.push(p);
+  }
+  for (const type of extraCorePatchTypesNeeded(result, playerCount)) {
+    const p = spawnPatch(result, type, rng, t);
+    if (p) result.push(p);
   }
   return result;
 };
@@ -690,42 +753,162 @@ const removePetal = (
     .filter((p) => p.petals.length > 0);
 
 /**
- * Build a fresh world. Pass two distinct ids when running a real PvP match
- * (`buildInitialWorld(rng, { selfId, opponentId })`) so log entries and
- * serialised player ids are stable across server snapshots.
+ * Build a fresh world. Pass player ids in join order for multiplayer, or
+ * `{ selfId, opponentId }` for solo / legacy 2-player tests.
  */
 export const buildInitialWorld = (
   rng: () => number,
-  ids: { selfId: string; opponentId: string } = { selfId: 'self', opponentId: 'opponent' },
+  ids: BuildInitialWorldIds = { selfId: 'self', opponentId: 'opponent' },
   config: BuildInitialWorldConfig = {},
+): World => {
+  const playerIds =
+    'playerIds' in ids ? [...ids.playerIds] : [ids.selfId, ids.opponentId];
+  const players: Record<string, PlayerState> = {};
+  for (const id of playerIds) {
+    players[id] = buildPlayer(id);
+  }
+  const playerCount = playerIds.length;
+  return {
+    t: 0,
+    phase: 'playing',
+    playerIds,
+    players,
+    activePlayerIds: [...playerIds],
+    eliminatedPlayerIds: [],
+    winnerId: null,
+    patches: seedPatches(rng, 0, playerCount),
+    patchCooldown: PATCH_RESPAWN_SECONDS,
+    playerCount,
+    aiWorkerCooldown: AI_WORKER_BASE,
+    aiPlaceCooldown: AI_PLACE_BASE,
+    aiPhantomCooldown: AI_PHANTOM_BASE,
+    aiCarpenterCooldown: AI_CARPENTER_BASE,
+    aiDifficulty: config.aiDifficulty ?? 'medium',
+    aiActionDelay: 0,
+    aiWorkerHoldHex: null,
+    aiWorkerHoldElapsed: 0,
+    log: [],
+  };
+};
+
+// ---- Player helpers --------------------------------------------------------
+
+export const joinIndexOf = (world: World, playerId: string): number =>
+  world.playerIds.indexOf(playerId);
+
+export const getPlayer = (world: World, playerId: string): PlayerState =>
+  world.players[playerId]!;
+
+export const setPlayerById = (
+  world: World,
+  playerId: string,
+  player: PlayerState,
 ): World => ({
-  t: 0,
-  phase: 'playing',
-  self: buildPlayer(ids.selfId),
-  opponent: buildPlayer(ids.opponentId),
-  patches: seedPatches(rng, 0),
-  patchCooldown: PATCH_RESPAWN_SECONDS,
-  aiWorkerCooldown: AI_WORKER_BASE,
-  aiPlaceCooldown: AI_PLACE_BASE,
-  aiPhantomCooldown: AI_PHANTOM_BASE,
-  aiCarpenterCooldown: AI_CARPENTER_BASE,
-  aiDifficulty: config.aiDifficulty ?? 'medium',
-  aiActionDelay: 0,
-  aiWorkerHoldHex: null,
-  aiWorkerHoldElapsed: 0,
-  winner: null,
-  log: [],
+  ...world,
+  players: { ...world.players, [playerId]: player },
 });
 
-// ---- Internal helpers ------------------------------------------------------
+/** Solo / legacy shim: first player is canonical `'self'`, second is `'opponent'`. */
+export const sideForPlayerId = (world: World, playerId: string): Side | null => {
+  const idx = joinIndexOf(world, playerId);
+  if (idx === 0) return 'self';
+  if (idx === 1 && world.playerIds.length === 2) return 'opponent';
+  return null;
+};
+
+export const playerIdForSide = (world: World, side: Side): string =>
+  side === 'self' ? world.playerIds[0]! : world.playerIds[1]!;
+
+export const opponentSlotForJoinIndex = (joinIndex: number): OpponentSlot => {
+  if (joinIndex === 2) return 'above';
+  if (joinIndex === 3) return 'below';
+  return 'right';
+};
+
+export const opponentHivePanelForJoinIndex = (joinIndex: number): OpponentHivePanel => {
+  if (joinIndex === 2) return 'opponent-hive-above';
+  if (joinIndex === 3) return 'opponent-hive-below';
+  return 'opponent-hive-right';
+};
+
+export const hivePanelForPlayer = (world: World, playerId: string): HiveAssaultPanel => {
+  const idx = joinIndexOf(world, playerId);
+  if (idx <= 0) return 'self-hive';
+  return opponentHivePanelForJoinIndex(idx);
+};
+
+export const viewerHivePanel = (
+  world: World,
+  viewerId: string,
+  playerId: string,
+): HiveAssaultPanel => {
+  if (playerId === viewerId) return 'self-hive';
+  return opponentHivePanelForJoinIndex(joinIndexOf(world, playerId));
+};
+
+const playerIdForCanonicalPanel = (world: World, panel: BeePanel): string | null => {
+  if (panel === 'flowers') return null;
+  if (panel === 'self-hive') return world.playerIds[0] ?? null;
+  if (panel === 'opponent-hive' || panel === 'opponent-hive-right') {
+    return world.playerIds[1] ?? null;
+  }
+  if (panel === 'opponent-hive-above') return world.playerIds[2] ?? null;
+  if (panel === 'opponent-hive-below') return world.playerIds[3] ?? null;
+  return null;
+};
+
+const remapBeePanelForViewer = (
+  world: World,
+  viewerId: string,
+  panel: BeePanel,
+): BeePanel => {
+  if (panel === 'flowers') return 'flowers';
+  const ownerId = playerIdForCanonicalPanel(world, panel);
+  if (!ownerId) return panel;
+  const relative = viewerHivePanel(world, viewerId, ownerId);
+  return relative === 'self-hive' ? 'self-hive' : relative;
+};
+
+/** Solo / 2-player: the second roster slot. */
+export const secondPlayer = (world: World): PlayerState =>
+  getPlayer(world, world.playerIds[1] ?? 'opponent');
+
+export const getActiveOpponentsOf = (
+  world: World,
+  viewerId: string,
+): readonly { readonly player: PlayerState; readonly slot: OpponentSlot }[] => {
+  const slotOrder: OpponentSlot[] = ['right', 'above', 'below'];
+  return world.activePlayerIds
+    .filter((id) => id !== viewerId)
+    .map((id) => ({
+      player: getPlayer(world, id),
+      slot: opponentSlotForJoinIndex(joinIndexOf(world, id)),
+    }))
+    .sort((a, b) => slotOrder.indexOf(a.slot) - slotOrder.indexOf(b.slot));
+};
+
+/** All non-viewer roster slots (active and eliminated) for snapshots and board navigation. */
+export const getRivalsOf = (
+  world: World,
+  viewerId: string,
+): readonly { readonly player: PlayerState; readonly slot: OpponentSlot }[] => {
+  const slotOrder: OpponentSlot[] = ['right', 'above', 'below'];
+  return world.playerIds
+    .filter((id) => id !== viewerId)
+    .map((id) => ({
+      player: getPlayer(world, id),
+      slot: opponentSlotForJoinIndex(joinIndexOf(world, id)),
+    }))
+    .sort((a, b) => slotOrder.indexOf(a.slot) - slotOrder.indexOf(b.slot));
+};
 
 const setPlayer = (world: World, side: Side, player: PlayerState): World =>
-  side === 'self' ? { ...world, self: player } : { ...world, opponent: player };
+  setPlayerById(world, playerIdForSide(world, side), player);
 
 const otherSide = (side: Side): Side => (side === 'self' ? 'opponent' : 'self');
 
-const sideHivePanel = (side: Side) =>
-  side === 'self' ? ('self-hive' as const) : ('opponent-hive' as const);
+const sideHivePanel = (world: World, side: Side): HiveAssaultPanel =>
+  hivePanelForPlayer(world, playerIdForSide(world, side));
 
 const logEvent = (world: World, entry: Omit<ActivityEntry, 'id'>): World => ({
   ...world,
@@ -798,12 +981,10 @@ export const tickWorld = (
   opts: TickOptions = {},
 ): World => {
   if (world.phase === 'over') return world;
-  let next: World = {
-    ...world,
-    t: world.t + dt,
-    self: tickHoney(world.self, dt),
-    opponent: tickHoney(world.opponent, dt),
-  };
+  let next: World = { ...world, t: world.t + dt };
+  for (const playerId of world.activePlayerIds) {
+    next = setPlayerById(next, playerId, tickHoney(getPlayer(next, playerId), dt));
+  }
   next = resolveArrivedBees(next, opts.clientPrediction ? undefined : rng);
   next = tickQueens(next);
   next = tickFreedLetters(next);
@@ -822,18 +1003,18 @@ export const tickSolo = (world: World, dt: number, rng: () => number): World =>
 
 const tickFreedLetters = (world: World): World => {
   const trim = (letters: readonly FreedLetter[]) => letters.filter((l) => l.witherAt > world.t);
-  const selfCurrent = world.self.freedLetters ?? [];
-  const oppCurrent = world.opponent.freedLetters ?? [];
-  const self = trim(selfCurrent);
-  const opponent = trim(oppCurrent);
-  if (self.length === selfCurrent.length && opponent.length === oppCurrent.length) {
-    return world;
+  let next = world;
+  let changed = false;
+  for (const playerId of world.activePlayerIds) {
+    const player = getPlayer(next, playerId);
+    const current = player.freedLetters ?? [];
+    const trimmed = trim(current);
+    if (trimmed.length !== current.length) {
+      next = setPlayerById(next, playerId, { ...player, freedLetters: trimmed });
+      changed = true;
+    }
   }
-  return {
-    ...world,
-    self: { ...world.self, freedLetters: self },
-    opponent: { ...world.opponent, freedLetters: opponent },
-  };
+  return changed ? next : world;
 };
 
 /**
@@ -857,18 +1038,18 @@ const tickPatches = (world: World, dt: number, rng: () => number): World => {
 
   let cooldown = world.patchCooldown - dt;
   const missing = missingPatchTypes(patches);
-  if (missing.length > 0) {
+  const extrasNeeded = extraCorePatchTypesNeeded(patches, world.playerCount);
+  const typesToSpawn = missing.length > 0 ? missing : extrasNeeded;
+  if (typesToSpawn.length > 0) {
     if (cooldown <= 0) {
-      // If several types are simultaneously missing, pick one at random to
-      // start with; the next cycle picks up the rest.
-      const type = missing[Math.floor(rng() * missing.length)]!;
+      const type = typesToSpawn[Math.floor(rng() * typesToSpawn.length)]!;
       const fresh = spawnPatch(patches, type, rng, world.t);
       if (fresh) {
         patches = [...patches, fresh];
         cooldown = PATCH_RESPAWN_SECONDS;
       }
     }
-  } else {
+  } else if (corePatches(patches).length >= corePatchTarget(patches, world.playerCount)) {
     cooldown = PATCH_RESPAWN_SECONDS;
   }
   let next: World = { ...world, patches, patchCooldown: cooldown };
@@ -906,14 +1087,15 @@ export function tileHasDraftableLetter(
 
 const resolveArrivedBees = (world: World, rng?: () => number): World => {
   let next = world;
-  for (const side of ['self', 'opponent'] as const) {
-    next = resolveSideBees(next, side, rng);
+  for (const playerId of world.activePlayerIds) {
+    next = resolvePlayerBees(next, playerId, rng);
   }
   return next;
 };
 
-const resolveSideBees = (world: World, side: Side, rng?: () => number): World => {
-  const player = world[side];
+const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): World => {
+  const player = getPlayer(world, playerId);
+  const hivePanel = hivePanelForPlayer(world, playerId);
   let next = world;
   let updatedPlayer = player;
   let updatedPatches = world.patches;
@@ -939,7 +1121,7 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
         continue;
       }
       if (bee.state.kind === 'queen-flying') {
-        const defender = world[otherSide(side)];
+        const defender = getPlayer(world, bee.state.defenderPlayerId);
         const f = bee.state.flight;
         const landing = bee.state.landingHex;
         const desired =
@@ -995,9 +1177,9 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
             state: {
               kind: 'worker-returning',
               flight: flight(
-                sideHivePanel(side),
+                hivePanel,
                 target,
-                sideHivePanel(side),
+                hivePanel,
                 hex(0, 0),
                 next.t,
                 FLIGHT_TIMES.tileToHive,
@@ -1013,9 +1195,9 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
               carrying: freedHere.letter,
               dropTile: drop.hex,
               flight: flight(
-                sideHivePanel(side),
+                hivePanel,
                 target,
-                sideHivePanel(side),
+                hivePanel,
                 hex(0, 0),
                 next.t,
                 FLIGHT_TIMES.tileToHive,
@@ -1050,7 +1232,7 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
               flight: flight(
                 'flowers',
                 target,
-                sideHivePanel(side),
+                hivePanel,
                 hex(0, 0),
                 next.t,
                 FLIGHT_TIMES.flowerToHive,
@@ -1068,7 +1250,7 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
               flight: flight(
                 'flowers',
                 target,
-                sideHivePanel(side),
+                hivePanel,
                 hex(0, 0),
                 next.t,
                 FLIGHT_TIMES.flowerToHive,
@@ -1099,7 +1281,7 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
             flight: flight(
               'flowers',
               target,
-              sideHivePanel(side),
+              hivePanel,
               hex(0, 0),
               next.t,
               FLIGHT_TIMES.flowerToHive,
@@ -1178,7 +1360,7 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
             queue: rest,
             target: nextTarget,
             flight: flight(
-              sideHivePanel(side),
+              hivePanel,
               hex(0, 0),
               'flowers',
               nextTarget,
@@ -1205,9 +1387,9 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
           state: {
             kind: 'worker-returning',
             flight: flight(
-              sideHivePanel(side),
+              hivePanel,
               freedTargetHex,
-              sideHivePanel(side),
+              hivePanel,
               hex(0, 0),
               next.t,
               FLIGHT_TIMES.tileToHive,
@@ -1228,9 +1410,9 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
           state: {
             kind: 'worker-returning',
             flight: flight(
-              sideHivePanel(side),
+              hivePanel,
               freedTargetHex,
-              sideHivePanel(side),
+              hivePanel,
               hex(0, 0),
               next.t,
               FLIGHT_TIMES.tileToHive,
@@ -1246,9 +1428,9 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
             carrying: found.letter,
             dropTile: drop.hex,
             flight: flight(
-              sideHivePanel(side),
+              hivePanel,
               freedTargetHex,
-              sideHivePanel(side),
+              hivePanel,
               hex(0, 0),
               next.t,
               FLIGHT_TIMES.tileToHive,
@@ -1349,7 +1531,12 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
           text: `${summary} +${bonus} 🜨${reuseTag}${beeTag}`,
         });
         if (beeBloom && rng) {
-          const bloomPatches = spawnPollenBloomPatches(updatedPatches, rng, next.t);
+          const bloomPatches = spawnPollenBloomPatches(
+            updatedPatches,
+            rng,
+            next.t,
+            next.playerCount,
+          );
           if (bloomPatches.length > 0) {
             updatedPatches = [...updatedPatches, ...bloomPatches];
           }
@@ -1399,9 +1586,9 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
               queue: rest,
               target: first,
               flight: flight(
-                sideHivePanel(side),
+                hivePanel,
                 hex(0, 0),
-                sideHivePanel(side),
+                hivePanel,
                 first,
                 next.t,
                 FLIGHT_TIMES.hiveToTile,
@@ -1482,9 +1669,9 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
             queue: rest,
             target: nextTarget,
             flight: flight(
-              sideHivePanel(side),
+              hivePanel,
               target,
-              sideHivePanel(side),
+              hivePanel,
               nextTarget,
               next.t,
               FLIGHT_TIMES.tileToTile,
@@ -1498,9 +1685,9 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
           state: {
             kind: 'carpenter-returning',
             flight: flight(
-              sideHivePanel(side),
+              hivePanel,
               target,
-              sideHivePanel(side),
+              hivePanel,
               hex(0, 0),
               next.t,
               FLIGHT_TIMES.tileToHive,
@@ -1530,6 +1717,7 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
         state: {
           kind: 'queen-assault',
           panel: bee.state.assaultPanel,
+          defenderPlayerId: bee.state.defenderPlayerId,
           currentHex: bee.state.landingHex,
           expiresAt: next.t + QUEEN_ASSAULT_DURATION_SECONDS,
           nextActionAt: next.t + 0.45,
@@ -1553,7 +1741,7 @@ const resolveSideBees = (world: World, side: Side, rng?: () => number): World =>
   if (beesChanged) {
     updatedPlayer = { ...updatedPlayer, bees: remainingBees };
   }
-  next = setPlayer(next, side, updatedPlayer);
+  next = setPlayerById(next, playerId, updatedPlayer);
   if (updatedPatches !== world.patches) {
     next = { ...next, patches: updatedPatches };
   }
@@ -1660,30 +1848,72 @@ const destroyTile = (player: PlayerState, h: Hex, t: number): DestroyTileResult 
   };
 };
 
-const finishQueenBreach = (
+const eliminatePlayer = (
   world: World,
-  attackerSide: Side,
+  attackerId: string,
   attacker: PlayerState,
-  defenderSide: Side,
+  defenderId: string,
   defender: PlayerState,
   bees: readonly Bee[],
 ): World => {
-  let next = setPlayer(world, defenderSide, defender);
-  next = setPlayer(next, attackerSide, { ...attacker, bees: [...bees] });
+  let next = setPlayerById(world, defenderId, { ...defender, bees: [] });
+  next = setPlayerById(next, attackerId, { ...attacker, bees: [...bees] });
+  const activePlayerIds = next.activePlayerIds.filter((id) => id !== defenderId);
+  const eliminatedPlayerIds = [...next.eliminatedPlayerIds, defenderId];
   next = logEvent(next, {
     t: next.t,
-    ownerId: next[attackerSide].id,
-    text: `queen breached hive!`,
+    ownerId: attackerId,
+    text: `${defenderId} eliminated!`,
   });
-  return { ...next, phase: 'over', winner: attackerSide };
+  if (activePlayerIds.length === 1) {
+    return {
+      ...next,
+      activePlayerIds,
+      eliminatedPlayerIds,
+      phase: 'over',
+      winnerId: activePlayerIds[0] ?? null,
+    };
+  }
+  return { ...next, activePlayerIds, eliminatedPlayerIds };
+};
+
+/** Remove a player who disconnected or forfeited. */
+export const eliminateByForfeit = (world: World, playerId: string): World => {
+  if (!world.activePlayerIds.includes(playerId)) return world;
+  const player = getPlayer(world, playerId);
+  let next = setPlayerById(world, playerId, { ...player, bees: [] });
+  const activePlayerIds = next.activePlayerIds.filter((id) => id !== playerId);
+  const eliminatedPlayerIds = [...next.eliminatedPlayerIds, playerId];
+  next = logEvent(next, {
+    t: next.t,
+    ownerId: playerId,
+    text: 'forfeit',
+  });
+  if (activePlayerIds.length === 1) {
+    return {
+      ...next,
+      activePlayerIds,
+      eliminatedPlayerIds,
+      phase: 'over',
+      winnerId: activePlayerIds[0] ?? null,
+    };
+  }
+  if (activePlayerIds.length === 0) {
+    return {
+      ...next,
+      activePlayerIds,
+      eliminatedPlayerIds,
+      phase: 'over',
+      winnerId: null,
+    };
+  }
+  return { ...next, activePlayerIds, eliminatedPlayerIds };
 };
 
 const tickQueens = (world: World): World => {
   let next = world;
-  for (const side of ['self', 'opponent'] as const) {
-    const attacker = next[side];
-    const defenderSide = otherSide(side);
-    let defender = next[defenderSide];
+  for (const attackerId of world.activePlayerIds) {
+    const attacker = getPlayer(next, attackerId);
     const bees: Bee[] = [];
     let dirty = false;
     for (const bee of attacker.bees) {
@@ -1692,6 +1922,11 @@ const tickQueens = (world: World): World => {
         continue;
       }
       dirty = true;
+      const defenderId = bee.state.defenderPlayerId;
+      if (!next.activePlayerIds.includes(defenderId)) {
+        continue;
+      }
+      let defender = getPlayer(next, defenderId);
       if (!Number.isFinite(bee.state.expiresAt) || next.t >= bee.state.expiresAt) continue;
       if (next.t < bee.state.nextActionAt) {
         bees.push(bee);
@@ -1699,18 +1934,16 @@ const tickQueens = (world: World): World => {
       }
       const ch = bee.state.currentHex;
       if (queenBreachedDefender(defender, ch)) {
-        return finishQueenBreach(next, side, attacker, defenderSide, defender, bees);
+        return eliminatePlayer(next, attackerId, attacker, defenderId, defender, bees);
       }
       const tileHere = defender.tiles.find((t) => hexEquals(t.hex, ch));
-      // Clear the hex the queen occupies before stepping inward (no tunneling
-      // past intact tiles).
       if (tileHere) {
         const nextDamage = (tileHere.damage ?? 0) + QUEEN_DAMAGE_PER_STRIKE;
         if (nextDamage >= hexHpForTile(tileHere)) {
           const destroyed = destroyTile(defender, ch, next.t);
           defender = destroyed.player;
           if (destroyed.hiveDestroyed || queenBreachedDefender(defender, ch)) {
-            return finishQueenBreach(next, side, attacker, defenderSide, defender, bees);
+            return eliminatePlayer(next, attackerId, attacker, defenderId, defender, bees);
           }
           next = logEvent(next, {
             t: next.t,
@@ -1729,6 +1962,7 @@ const tickQueens = (world: World): World => {
           ...bee,
           state: { ...bee.state, nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS },
         });
+        next = setPlayerById(next, defenderId, defender);
         continue;
       }
 
@@ -1741,7 +1975,7 @@ const tickQueens = (world: World): World => {
         continue;
       }
       if (queenBreachedDefender(defender, step)) {
-        return finishQueenBreach(next, side, attacker, defenderSide, defender, bees);
+        return eliminatePlayer(next, attackerId, attacker, defenderId, defender, bees);
       }
       const targetTile = defender.tiles.find((t) => hexEquals(t.hex, step));
       if (!targetTile) {
@@ -1760,7 +1994,7 @@ const tickQueens = (world: World): World => {
         const destroyed = destroyTile(defender, step, next.t);
         defender = destroyed.player;
         if (destroyed.hiveDestroyed || queenBreachedDefender(defender, step)) {
-          return finishQueenBreach(next, side, attacker, defenderSide, defender, bees);
+          return eliminatePlayer(next, attackerId, attacker, defenderId, defender, bees);
         }
         next = logEvent(next, {
           t: next.t,
@@ -1787,11 +2021,10 @@ const tickQueens = (world: World): World => {
           state: { ...bee.state, nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS },
         });
       }
+      next = setPlayerById(next, defenderId, defender);
     }
     if (dirty) {
-      const updatedAttacker = { ...attacker, bees };
-      next = setPlayer(next, side, updatedAttacker);
-      next = setPlayer(next, defenderSide, defender);
+      next = setPlayerById(next, attackerId, { ...attacker, bees });
     }
   }
   return next;
@@ -1826,8 +2059,17 @@ export type CommandResult =
  * with the letter — storage is filled when the bee reaches the door (no
  * separate hop to a storage hex). Every dispatch costs `worker.honeyCost`.
  */
-export const dispatchWorker = (world: World, side: Side, target: Hex): CommandResult => {
-  const player = world[side];
+const resolveActorId = (world: World, actor: Side | string): string =>
+  actor === 'self' || actor === 'opponent'
+    ? playerIdForSide(world, actor)
+    : actor;
+
+export const dispatchWorker = (
+  world: World,
+  playerId: string,
+  target: Hex,
+): CommandResult => {
+  const player = getPlayer(world, playerId);
   const cost = BEE_STATS.worker.honeyCost;
   if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
   const freedTarget = (player.freedLetters ?? []).find((f) => hexEquals(f.hex, target));
@@ -1838,7 +2080,7 @@ export const dispatchWorker = (world: World, side: Side, target: Hex): CommandRe
     return { ok: false, world, reason: 'storage is full' };
   }
 
-  const panel = sideHivePanel(side);
+  const panel = hivePanelForPlayer(world, playerId);
   const bee: Bee = {
     id: newId(),
     kind: 'worker',
@@ -1863,28 +2105,19 @@ export const dispatchWorker = (world: World, side: Side, target: Hex): CommandRe
     honey: player.honey - cost,
     bees: [...player.bees, bee],
   };
-  return { ok: true, world: setPlayer(world, side, updated) };
+  return { ok: true, world: setPlayerById(world, playerId, updated) };
 };
 
-/**
- * Spawn a queen that flies from the player's hive across to the opponent's
- * outer ring, then autonomously chews her way inward toward the central hive
- * tile. Costs {@link BEE_STATS.queen.honeyCost} and requires at least
- * {@link QUEEN_MIN_OWNED_HEXES} owned hive hexes; the number of queens a side
- * may have airborne at once is given by {@link queenAllowanceFor} (one plus
- * one for every {@link HEXES_PER_QUEEN_SLOT} owned hexes).
- *
- * Supply at most one of:
- * - `target`: explicit outer-ring hex (legacy / tests),
- * - `attackSide`: engine picks {@link pickQueenLandingHexForSide},
- * - neither: auto {@link pickQueenLandingHex}.
- */
 export const dispatchQueen = (
   world: World,
-  side: Side,
-  opts?: { readonly target?: Hex; readonly attackSide?: QueenAttackSide },
+  playerId: string,
+  opts?: {
+    readonly target?: Hex;
+    readonly attackSide?: QueenAttackSide;
+    readonly targetPlayerId?: string;
+  },
 ): CommandResult => {
-  const player = world[side];
+  const player = getPlayer(world, playerId);
   const cost = BEE_STATS.queen.honeyCost;
   if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
   if (player.tiles.length < QUEEN_MIN_OWNED_HEXES) {
@@ -1893,7 +2126,20 @@ export const dispatchQueen = (
   if (activeQueenCountFor(player) >= queenAllowanceFor(player)) {
     return { ok: false, world, reason: 'queen allowance reached' };
   }
-  const enemy = world[otherSide(side)];
+  const activeOpponents = world.activePlayerIds.filter((id) => id !== playerId);
+  let defenderId = opts?.targetPlayerId;
+  if (activeOpponents.length > 1) {
+    if (!defenderId || !activeOpponents.includes(defenderId)) {
+      return { ok: false, world, reason: 'choose a target player' };
+    }
+  } else {
+    defenderId = defenderId ?? activeOpponents[0];
+  }
+  if (!defenderId) return { ok: false, world, reason: 'no target player' };
+  if (world.eliminatedPlayerIds.includes(defenderId)) {
+    return { ok: false, world, reason: 'target eliminated' };
+  }
+  const enemy = getPlayer(world, defenderId);
   const { target, attackSide } = opts ?? {};
   if (target !== undefined && attackSide !== undefined) {
     return { ok: false, world, reason: 'queen attack overspecified' };
@@ -1913,8 +2159,8 @@ export const dispatchQueen = (
     landing = pickQueenLandingHex(enemy);
   }
   if (!landing) return { ok: false, world, reason: 'enemy hive unavailable' };
-  const ownerPanel = sideHivePanel(side);
-  const enemyPanel = sideHivePanel(otherSide(side));
+  const ownerPanel = hivePanelForPlayer(world, playerId);
+  const enemyPanel = hivePanelForPlayer(world, defenderId);
   const bee: Bee = {
     id: newId(),
     kind: 'queen',
@@ -1923,6 +2169,7 @@ export const dispatchQueen = (
     state: {
       kind: 'queen-flying',
       assaultPanel: enemyPanel,
+      defenderPlayerId: defenderId,
       landingHex: landing,
       approachVoidHexKeys: queenApproachVoidHexKeys(enemy, landing),
       ...(attackSide !== undefined ? { attackSide } : {}),
@@ -1942,24 +2189,19 @@ export const dispatchQueen = (
     honey: player.honey - cost,
     bees: [...player.bees, bee],
   };
-  return { ok: true, world: setPlayer(world, side, updated) };
+  return { ok: true, world: setPlayerById(world, playerId, updated) };
 };
 
-/**
- * Move a letter between storage and the honeycomb, or reposition an uncapped
- * letter between empty honeycomb / storage slots. Capped tiles cannot be a
- * source. Letters stay on `active` until a drone scores them (`capped`).
- */
 export const placeLetter = (
   world: World,
-  side: Side,
+  playerId: string,
   fromHex: Hex,
   toHex: Hex,
 ): CommandResult => {
   if (hexEquals(fromHex, toHex)) {
     return { ok: false, world, reason: 'source and destination are the same' };
   }
-  const player = world[side];
+  const player = getPlayer(world, playerId);
   const source = player.tiles.find((t) => hexEquals(t.hex, fromHex));
   const dest = player.tiles.find((t) => hexEquals(t.hex, toHex));
   if (!source?.letter) {
@@ -1997,7 +2239,7 @@ export const placeLetter = (
       return t;
     }),
   };
-  return { ok: true, world: setPlayer(world, side, updated) };
+  return { ok: true, world: setPlayerById(world, playerId, updated) };
 };
 
 /**
@@ -2008,10 +2250,10 @@ export const placeLetter = (
  */
 export const trySubmitWord = (
   world: World,
-  side: Side,
+  playerId: string,
   paths: readonly (readonly Hex[])[],
 ): CommandResult => {
-  const player = world[side];
+  const player = getPlayer(world, playerId);
   const cost = BEE_STATS.drone.honeyCost;
   if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
   if (paths.length === 0) return { ok: false, world, reason: 'no words submitted' };
@@ -2051,7 +2293,7 @@ export const trySubmitWord = (
     capacity: BEE_STATS.drone.capacity,
     state: {
       kind: 'capping',
-      panel: sideHivePanel(side),
+      panel: hivePanelForPlayer(world, playerId),
       paths,
       startedAt: world.t,
       arrivesAt: world.t + flightSeconds,
@@ -2063,7 +2305,7 @@ export const trySubmitWord = (
     bees: [...player.bees, bee],
     usedWordSignatures: [...player.usedWordSignatures, ...nextSignatures],
   };
-  return { ok: true, world: setPlayer(world, side, updated) };
+  return { ok: true, world: setPlayerById(world, playerId, updated) };
 };
 
 const isCarpenterEligible = (player: PlayerState, h: Hex): boolean => {
@@ -2087,16 +2329,17 @@ const isCarpenterEligible = (player: PlayerState, h: Hex): boolean => {
  */
 export const dispatchCarpenter = (
   world: World,
-  side: Side,
+  playerId: string,
   target: Hex,
 ): CommandResult => {
-  const player = world[side];
+  const player = getPlayer(world, playerId);
   const cost = BEE_STATS.carpenter.honeyCost;
   if (player.honey < cost) return { ok: false, world, reason: 'not enough honey' };
   if (!isCarpenterEligible(player, target)) {
     return { ok: false, world, reason: 'tile must touch your hive' };
   }
 
+  const panel = hivePanelForPlayer(world, playerId);
   const bee: Bee = {
     id: newId(),
     kind: 'carpenter',
@@ -2107,9 +2350,9 @@ export const dispatchCarpenter = (
       queue: [],
       target,
       flight: flight(
-        sideHivePanel(side),
+        panel,
         hex(0, 0),
-        sideHivePanel(side),
+        panel,
         target,
         world.t,
         FLIGHT_TIMES.hiveToTile,
@@ -2122,7 +2365,7 @@ export const dispatchCarpenter = (
     honey: player.honey - cost,
     bees: [...player.bees, bee],
   };
-  return { ok: true, world: setPlayer(world, side, updated) };
+  return { ok: true, world: setPlayerById(world, playerId, updated) };
 };
 
 // ---- Unified command + snapshot surface -----------------------------------
@@ -2135,46 +2378,39 @@ export const dispatchCarpenter = (
  */
 export const applyCommand = (
   world: World,
-  side: Side,
+  actor: Side | string,
   cmd: GameCommand,
 ): CommandResult => {
+  const playerId = resolveActorId(world, actor);
   switch (cmd.kind) {
     case 'dispatchWorker':
-      return dispatchWorker(world, side, cmd.target);
+      return dispatchWorker(world, playerId, cmd.target);
     case 'dispatchCarpenter':
-      return dispatchCarpenter(world, side, cmd.target);
+      return dispatchCarpenter(world, playerId, cmd.target);
     case 'dispatchQueen':
-      return dispatchQueen(world, side, {
+      return dispatchQueen(world, playerId, {
         ...(cmd.target !== undefined ? { target: cmd.target } : {}),
         ...(cmd.attackSide !== undefined ? { attackSide: cmd.attackSide } : {}),
+        ...(cmd.targetPlayerId !== undefined ? { targetPlayerId: cmd.targetPlayerId } : {}),
       });
     case 'placeLetter':
-      return placeLetter(world, side, cmd.from, cmd.to);
+      return placeLetter(world, playerId, cmd.from, cmd.to);
     case 'submitWords':
-      return trySubmitWord(world, side, cmd.paths);
+      return trySubmitWord(world, playerId, cmd.paths);
   }
 };
 
-/**
- * Flip a {@link BeePanel} between the two hive panels. The `'flowers'` panel
- * is shared between players and is left alone.
- */
-const flipPanel = (panel: BeePanel): BeePanel =>
-  panel === 'self-hive' ? 'opponent-hive' : panel === 'opponent-hive' ? 'self-hive' : panel;
-
-const flipFlight = (flight: BeeFlight): BeeFlight => ({
+const remapFlightForViewer = (
+  world: World,
+  viewerId: string,
+  flight: BeeFlight,
+): BeeFlight => ({
   ...flight,
-  from: { ...flight.from, panel: flipPanel(flight.from.panel) },
-  to: { ...flight.to, panel: flipPanel(flight.to.panel) },
+  from: { ...flight.from, panel: remapBeePanelForViewer(world, viewerId, flight.from.panel) },
+  to: { ...flight.to, panel: remapBeePanelForViewer(world, viewerId, flight.to.panel) },
 });
 
-/**
- * Rewrite every panel reference inside a bee's `state` so that `'self-hive'`
- * and `'opponent-hive'` are swapped. Hex coordinates are global (the same
- * hex grid is rendered on both sides) and don't need transformation. This is
- * the joiner-perspective half of {@link worldToSnapshot}.
- */
-const flipBeePanels = (bee: Bee): Bee => {
+const remapBeeForViewer = (world: World, viewerId: string, bee: Bee): Bee => {
   const s = bee.state;
   let next: BeeState;
   switch (s.kind) {
@@ -2184,55 +2420,64 @@ const flipBeePanels = (bee: Bee): Bee => {
     case 'worker-returning':
     case 'carpenter-flying':
     case 'carpenter-returning':
-      next = { ...s, flight: flipFlight(s.flight) };
+      next = { ...s, flight: remapFlightForViewer(world, viewerId, s.flight) };
       break;
     case 'queen-flying':
       next = {
         ...s,
-        flight: flipFlight(s.flight),
-        assaultPanel: flipPanel(s.assaultPanel) as 'self-hive' | 'opponent-hive',
+        flight: remapFlightForViewer(world, viewerId, s.flight),
+        assaultPanel: remapBeePanelForViewer(
+          world,
+          viewerId,
+          s.assaultPanel,
+        ) as HiveAssaultPanel,
       };
       break;
     case 'capping':
     case 'queen-assault':
-      next = { ...s, panel: flipPanel(s.panel) as 'self-hive' | 'opponent-hive' };
+      next = {
+        ...s,
+        panel: remapBeePanelForViewer(world, viewerId, s.panel) as HiveAssaultPanel,
+      };
       break;
   }
   return { ...bee, state: next };
 };
 
-const flipPlayerBees = (player: PlayerState): PlayerState => ({
+const remapPlayerBeesForViewer = (
+  world: World,
+  viewerId: string,
+  player: PlayerState,
+): PlayerState => ({
   ...player,
-  bees: player.bees.map(flipBeePanels),
+  bees: player.bees.map((b) => remapBeeForViewer(world, viewerId, b)),
 });
 
 /**
  * Project a server-side {@link World} into the {@link WorldSnapshot} a single
- * client receives. The viewer always sees themselves as `self`. For the room's
- * "opponent" player we swap the sides, remap `world.winner`, and rewrite the
- * `panel` labels baked into every bee's state so the renderer draws bees on
- * the right hive panel — without that remap, the joiner would see their own
- * bees flying out of the opponent's hive.
+ * client receives. The viewer always sees themselves as `self`.
  */
 export const worldToSnapshot = (
   world: World,
-  viewerSide: Side,
+  viewerIdOrSide: string | Side,
   tick: number,
 ): WorldSnapshot => {
-  const swap = viewerSide !== 'self';
-  const rawSelf = swap ? world.opponent : world.self;
-  const rawOpp = swap ? world.self : world.opponent;
-  const self = swap ? flipPlayerBees(rawSelf) : rawSelf;
-  const opponent = swap ? flipPlayerBees(rawOpp) : rawOpp;
+  const viewerId = resolveActorId(world, viewerIdOrSide);
+  const opponents = getRivalsOf(world, viewerId);
   const winner =
-    world.winner === null ? null : world.winner === viewerSide ? 'self' : 'opponent';
+    world.winnerId === null ? null : world.winnerId === viewerId ? 'self' : null;
   return {
     t: world.t,
     tick,
     phase: world.phase,
     winner,
-    self,
-    opponent,
+    self: remapPlayerBeesForViewer(world, viewerId, getPlayer(world, viewerId)),
+    opponents: opponents.map((o) =>
+      remapPlayerBeesForViewer(world, viewerId, o.player),
+    ),
+    opponentSlots: opponents.map((o) => o.slot),
+    playerCount: world.playerCount,
+    eliminatedPlayerIds: world.eliminatedPlayerIds,
     patches: world.patches,
     log: world.log,
   };
@@ -2260,10 +2505,10 @@ export const tickSoloAi = (world: World, dt: number, rng: () => number): World =
   aiPhantomCooldown -= dt;
   aiCarpenterCooldown -= dt;
 
+  const aiId = world.playerIds[1] ?? 'opponent';
+
   if (aiWorkerCooldown <= 0) {
-    // Send a worker if storage has room, the AI can afford it, and a petal
-    // is available that no other in-flight worker is already chasing.
-    const ai = next.opponent;
+    const ai = getPlayer(next, aiId);
     const hasStorageRoom = ai.tiles.some((t) => t.state === 'storage' && !t.letter);
     if (hasStorageRoom && ai.honey >= BEE_STATS.worker.honeyCost) {
       const claimed = new Set<string>();
@@ -2275,7 +2520,7 @@ export const tickSoloAi = (world: World, dt: number, rng: () => number): World =
         .filter((h) => !claimed.has(hexKey(h)));
       if (available.length > 0) {
         const pick = available[Math.floor(rng() * available.length)]!;
-        const r = dispatchWorker(next, 'opponent', pick);
+        const r = dispatchWorker(next, aiId, pick);
         if (r.ok) next = r.world;
       }
     }
@@ -2283,15 +2528,15 @@ export const tickSoloAi = (world: World, dt: number, rng: () => number): World =
   }
 
   if (aiPlaceCooldown <= 0) {
-    // Place the first stored letter onto the first empty active tile.
-    const filledStorage = next.opponent.tiles.find(
+    const aiPlayer = getPlayer(next, aiId);
+    const filledStorage = aiPlayer.tiles.find(
       (t) => t.state === 'storage' && t.letter !== null,
     );
-    const emptyActive = next.opponent.tiles.find(
+    const emptyActive = aiPlayer.tiles.find(
       (t) => t.state === 'active' && !t.letter,
     );
     if (filledStorage && emptyActive) {
-      const r = placeLetter(next, 'opponent', filledStorage.hex, emptyActive.hex);
+      const r = placeLetter(next, aiId, filledStorage.hex, emptyActive.hex);
       if (r.ok) next = r.world;
     }
     aiPlaceCooldown = AI_PLACE_BASE + rng() * 2;
@@ -2303,9 +2548,7 @@ export const tickSoloAi = (world: World, dt: number, rng: () => number): World =
   }
 
   if (aiCarpenterCooldown <= 0) {
-    // Dispatch a carpenter to one eligible frontier-or-inactive hex when
-    // honey allows it and no other carpenter is in flight.
-    const ai = next.opponent;
+    const ai = getPlayer(next, aiId);
     const pending = ai.bees.some(
       (b) => b.state.kind === 'carpenter-flying' || b.state.kind === 'carpenter-returning',
     );
@@ -2318,7 +2561,7 @@ export const tickSoloAi = (world: World, dt: number, rng: () => number): World =
       );
       if (candidates.length > 0) {
         const pick = candidates[Math.floor(rng() * candidates.length)]!;
-        const r = dispatchCarpenter(next, 'opponent', pick);
+        const r = dispatchCarpenter(next, aiId, pick);
         if (r.ok) next = r.world;
       }
     }
@@ -2335,20 +2578,20 @@ export const tickSoloAi = (world: World, dt: number, rng: () => number): World =
 };
 
 const simulatePhantomWord = (world: World, rng: () => number): World => {
+  const aiId = world.playerIds[1] ?? 'opponent';
   const length = 3 + Math.floor(rng() * 3);
   const letters: Letter[] = [];
-  // Phantom words mix vowels and common consonants — gives the AI a believable
-  // spread without needing actual letters on its board.
   const pool = [...FLOWER_LETTER_POOLS.vowel, ...FLOWER_LETTER_POOLS.common];
   for (let i = 0; i < length; i++) {
     letters.push(pool[Math.floor(rng() * pool.length)]!);
   }
   const bonus = wordScore(letters);
   let next = world;
-  next = setPlayer(next, 'opponent', grantHoney(next.opponent, bonus));
+  const ai = getPlayer(next, aiId);
+  next = setPlayerById(next, aiId, grantHoney(ai, bonus));
   next = logEvent(next, {
     t: next.t,
-    ownerId: next.opponent.id,
+    ownerId: aiId,
     text: `${letters.join('')} +${bonus} 🜨`,
   });
   return next;

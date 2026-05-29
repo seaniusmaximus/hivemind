@@ -16,11 +16,10 @@ export const GameOver = () => {
 
   const phase = useGameStore((s) => s.world.phase);
 
-  const winner = useGameStore((s) => s.world.winner);
-
+  const winnerId = useGameStore((s) => s.world.winnerId);
   const self = useGameStore((s) => s.world.self);
-
   const opponent = useGameStore((s) => s.world.opponent);
+  const opponents = useGameStore((s) => s.world.opponents);
 
   const initSolo = useGameStore((s) => s.initSolo);
 
@@ -98,15 +97,15 @@ export const GameOver = () => {
 
       else outcome = onlineResult.winnerId === room.selfId ? 'win' : 'lose';
 
-    } else if (winner === 'self') outcome = 'win';
+    } else if (winnerId === self.id) outcome = 'win';
 
-    else if (winner === 'opponent') outcome = 'lose';
+    else if (winnerId !== null) outcome = 'lose';
 
     else outcome = 'draw';
 
     playGameOver(outcome);
 
-  }, [isOver, onlineResult, winner, room]);
+  }, [isOver, onlineResult, winnerId, room, self.id]);
 
 
 
@@ -116,7 +115,9 @@ export const GameOver = () => {
 
   const selfPlayer = room?.players.find((p) => p.id === room.selfId) ?? null;
 
-  const opponentPlayer = room?.players.find((p) => p.id === room?.opponentId) ?? null;
+  const opponentPlayer =
+    room?.players.find((p) => p.id !== room.selfId && opponents.some((o) => o.id === p.id)) ??
+    null;
 
   const selfReady = !!selfPlayer?.ready || rematchClicked;
 
@@ -138,11 +139,11 @@ export const GameOver = () => {
 
         : 'HIVE FALLS'
 
-    : winner === 'self'
+    : winnerId === self.id
 
       ? 'HIVE TRIUMPHS'
 
-      : winner === 'opponent'
+      : winnerId !== null
 
         ? 'HIVE FALLS'
 
@@ -162,13 +163,13 @@ export const GameOver = () => {
 
 
 
-  const canRematch = mode === 'online' && opponentPresent && onlineResult?.reason !== 'forfeit';
+  const canRematch = mode === 'online' && (room?.players.length ?? 0) >= 2 && onlineResult?.reason !== 'forfeit';
 
 
 
-  const rematchLabel = !opponentPresent
+  const rematchLabel = (room?.players.length ?? 0) < 2
 
-    ? 'WAITING FOR OPPONENT…'
+    ? 'WAITING FOR PLAYERS…'
 
     : selfReady && opponentReady
 

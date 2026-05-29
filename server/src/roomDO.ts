@@ -31,7 +31,6 @@ import { DurableObject } from 'cloudflare:workers';
 import type {
   ClientMessage,
   ServerMessage,
-  Side,
 } from '@hivemind/shared';
 import { createGameLoop, type GameLoop, type GameLoopPort } from './gameLoop.js';
 import { isWord } from './dictionary.js';
@@ -42,9 +41,9 @@ interface Player {
   socket: WebSocket;
   name: string;
   ready: boolean;
-  /** Assigned at GAME_START; null while still in the lobby. */
-  side: Side | null;
 }
+
+const MAX_PLAYERS = 4;
 
 const newPlayerId = (): string => Math.random().toString(36).slice(2, 10);
 
@@ -71,7 +70,7 @@ export class RoomDO extends DurableObject<Env> {
     const code = url.pathname.split('/').pop()?.toUpperCase() ?? '';
     if (code) this.code = code;
 
-    if (this.players.length >= 2) {
+    if (this.players.length >= MAX_PLAYERS) {
       return new Response('room full', { status: 409 });
     }
 
@@ -138,33 +137,24 @@ export class RoomDO extends DurableObject<Env> {
   }
 
   private startGame(): void {
-    const [host, joiner] = this.players;
-    if (!host || !joiner) return;
+    if (this.players.length < 2) return;
 
-    // Rematch path: tear down any prior loop before spinning up the new one.
     if (this.loop) {
       this.loop.stop();
       this.loop = null;
     }
-
-    // First-to-join is the host (canonical `'self'` on the server's World);
-    // the other is `'opponent'`. `worldToSnapshot` swaps perspective per-player
-    // so each client sees themselves as `self`.
-    host.side = 'self';
-    joiner.side = 'opponent';
 
     this.phase = 'countdown';
     this.sendRoomState();
 
     const seed = Math.floor(Math.random() * 0xffffffff);
     const startedAt = Date.now();
+    const playerIds = this.players.map((p) => p.id);
     for (const player of this.players) {
-      const opponent = this.players.find((p) => p !== player);
-      if (!opponent) continue;
       sendJson(player.socket, {
         type: 'GAME_START',
         selfId: player.id,
-        opponentId: opponent.id,
+        playerIds,
         seed,
         tickRate: 15,
         startedAt,
@@ -174,10 +164,7 @@ export class RoomDO extends DurableObject<Env> {
     this.phase = 'playing';
     this.loop = createGameLoop(
       {
-        players: [
-          { id: host.id, side: 'self' },
-          { id: joiner.id, side: 'opponent' },
-        ],
+        players: this.players.map((p) => ({ id: p.id })),
         seed,
       },
       this.port(),
@@ -204,7 +191,7 @@ export class RoomDO extends DurableObject<Env> {
       case 'HELLO': {
         // Idempotent: a duplicate HELLO from an already-bound socket is a no-op.
         if (this.players.some((p) => p.socket === socket)) return;
-        if (this.players.length >= 2) {
+        if (this.players.length >= MAX_PLAYERS) {
           sendJson(socket, {
             type: 'ERROR',
             code: 'ROOM_FULL',
@@ -218,7 +205,6 @@ export class RoomDO extends DurableObject<Env> {
           socket,
           name: msg.playerName,
           ready: false,
-          side: null,
         };
         this.players.push(player);
         this.sendRoomState();
@@ -232,7 +218,7 @@ export class RoomDO extends DurableObject<Env> {
         player.ready = true;
         this.sendRoomState();
         if (
-          this.players.length === 2 &&
+          this.players.length >= 2 &&
           this.players.every((p) => p.ready)
         ) {
           this.startGame();

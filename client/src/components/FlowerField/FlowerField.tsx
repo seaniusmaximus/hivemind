@@ -81,8 +81,9 @@ export const FlowerField = () => {
   const engineT = useGameStore((s) => s.world.t);
   const honey = useGameStore((s) => s.world.self.honey);
   const tiles = useGameStore((s) => s.world.self.tiles);
+  const opponents = useGameStore((s) => s.world.opponents);
   const selfBees = useGameStore((s) => s.world.self.bees);
-  const oppBees = useGameStore((s) => s.world.opponent.bees);
+  const oppBees = useMemo(() => opponents.flatMap((o) => o.bees), [opponents]);
   const dispatchWorker = useGameStore((s) => s.dispatchWorker);
   const pushToast = useGameStore((s) => s.pushToast);
   const workerCost = BEE_STATS.worker.honeyCost;

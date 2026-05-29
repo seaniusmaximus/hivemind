@@ -21,9 +21,10 @@ import {
   remainingHpForTile,
   tileHasDraftableLetter,
   type Hex,
-  type Side,
+  type PlayerState,
   type TileSnapshot,
 } from '@hivemind/shared';
+import type { BeePanel } from '@hivemind/shared';
 import { useGameStore, draftKeySet } from '../../state/gameStore.js';
 import {
   centeredViewBoxExtent,
@@ -36,10 +37,20 @@ import {
 import { HOLD_HINT_SECONDS, useHoldToDispatch } from '../useHoldToDispatch.js';
 
 interface Props {
-  side: Side;
-  /** Rendered under the hive title (e.g. honey cap from {@link PlayerPanel}). */
+  /** Local player hive (panel 0). */
+  side?: 'self';
+  /** Index into `world.opponents` for rival full-board panels (2–4). */
+  opponentIndex?: number;
   honeyLabel?: ReactNode;
 }
+
+const OPPONENT_PANELS: readonly BeePanel[] = [
+  'opponent-hive-right',
+  'opponent-hive-above',
+  'opponent-hive-below',
+];
+
+type DragMode = 'word-draft' | 'letter-move' | null;
 
 const HEX_SIZE = 30;
 const REUSE_RING_STEP = 4;
@@ -118,13 +129,31 @@ const crackPaths = (key: string, size: number, severity: number): string[] => {
   return paths;
 };
 
-type DragMode = 'word-draft' | 'letter-move' | null;
+/** Placeholder for unused rival panels (2–3 player); keeps hook order stable. */
+const EMPTY_RIVAL: PlayerState = {
+  id: '__empty__',
+  honey: 0,
+  tiles: [],
+  bees: [],
+  usedWordSignatures: [],
+  bestWord: '',
+  bestWordScore: 0,
+};
 
-export const HiveGrid = ({ side, honeyLabel }: Props) => {
-  const tiles = useGameStore((s) => s.world[side].tiles);
+export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
+  const isSelf = side === 'self';
+  const rival = useGameStore((s) => (isSelf ? undefined : s.world.opponents[opponentIndex]));
+  const player = useGameStore((s) =>
+    isSelf ? s.world.self : (s.world.opponents[opponentIndex] ?? EMPTY_RIVAL),
+  );
+  const isEmptySlot = !isSelf && rival === undefined;
+  const eliminatedPlayerIds = useGameStore((s) => s.world.eliminatedPlayerIds);
+  const isEliminatedRival =
+    !isSelf && rival !== undefined && eliminatedPlayerIds.includes(rival.id);
+  const tiles = player.tiles;
   const drafts = useGameStore((s) => s.wordDrafts);
-  const letterDrag = useGameStore((s) => (side === 'self' ? s.letterDrag : null));
-  const dropHover = useGameStore((s) => (side === 'self' ? s.dropHover : null));
+  const letterDrag = useGameStore((s) => (isSelf ? s.letterDrag : null));
+  const dropHover = useGameStore((s) => (isSelf ? s.dropHover : null));
   const startDraft = useGameStore((s) => s.startDraft);
   const extendDraft = useGameStore((s) => s.extendDraft);
   const endDraft = useGameStore((s) => s.endDraft);
@@ -164,7 +193,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
     cancel: cancelHold,
   } = useHoldToDispatch(
     dispatchCarpenter,
-    side === 'self' ? { canStart: canStartHold } : {},
+    isSelf ? { canStart: canStartHold } : {},
   );
 
   const {
@@ -174,7 +203,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
     cancel: cancelWorkerHold,
   } = useHoldToDispatch(
     dispatchWorker,
-    side === 'self'
+    isSelf
       ? {
           canStart: (h) => {
             if (honeyRef.current < workerCost) {
@@ -229,7 +258,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
 
   // Track drop target from pointer position (per-tile pointerleave is unreliable).
   useEffect(() => {
-    if (!letterDrag || side !== 'self') return;
+    if (!letterDrag || !isSelf) return;
 
     const syncHover = (e: PointerEvent) => {
       if (!useGameStore.getState().letterDrag) {
@@ -257,7 +286,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
     };
   }, [
     letterDrag,
-    side,
+    isSelf,
     setDropHover,
     resolveDropHoverFromPointer,
     cancelHold,
@@ -295,7 +324,6 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
   // Frontier = derived inactive hexes around your active/letter/capped tiles.
   // Folded in alongside the owned tiles so the renderer can treat both
   // uniformly. Re-derived whenever the player's tile set changes.
-  const player = useGameStore((s) => s.world[side]);
   const floatingLetters = player.freedLetters ?? [];
   const frontier = useMemo(() => frontierFor(player), [player]);
   const ownedKeys = useMemo(() => new Set(tiles.map((t) => hexKey(t.hex))), [tiles]);
@@ -328,12 +356,12 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
   // Eligible carpenter targets: every visible inactive hex (the frontier set is
   // already the eligibility set). Plus any legacy `inactive` owned tile.
   const eligibleCarpenter = useMemo(() => {
-    if (side !== 'self') return new Set<string>();
+    if (!isSelf) return new Set<string>();
     const set = new Set<string>();
     for (const h of frontier) set.add(hexKey(h));
     for (const t of tiles) if (t.state === 'inactive') set.add(hexKey(t.hex));
     return set;
-  }, [tiles, frontier, side]);
+  }, [tiles, frontier, isSelf]);
 
   // Hexes currently being targeted by an in-flight carpenter for *this* side.
   // Persists the outline drawn during the hold gesture for the full duration
@@ -351,7 +379,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
     }
     return set;
   }, [player.bees]);
-  const claimOwner = side === 'self' ? 'self' : 'opp';
+  const claimOwner = isSelf ? 'self' : 'opp';
   // `player === world[side]` so this checks the right side either way; the
   // central-hive click only fires for `side === 'self'` below.
   const queensActive = activeQueenCountFor(player);
@@ -359,7 +387,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
   const queensFull = queensActive >= queenAllowance;
   const hiveLargeEnoughForQueen = player.tiles.length >= QUEEN_MIN_OWNED_HEXES;
   const canSpawnQueen =
-    side === 'self' &&
+    isSelf &&
     honey >= queenCost &&
     !queensFull &&
     hiveLargeEnoughForQueen;
@@ -369,7 +397,12 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
   );
 
   /** Defender tiles where an enemy queen is currently inbound (queen-flying). */
-  const attackerBees = useGameStore((s) => s.world[side === 'opponent' ? 'self' : 'opponent'].bees);
+  const opponents = useGameStore((s) => s.world.opponents);
+  const selfBeesForIncoming = useGameStore((s) => s.world.self.bees);
+  const attackerBees = useMemo(
+    () => (isSelf ? opponents.flatMap((o) => o.bees) : selfBeesForIncoming),
+    [isSelf, opponents, selfBeesForIncoming],
+  );
   const incomingQueenHexKeys = useMemo(() => {
     const keys = new Set<string>();
     for (const b of attackerBees) {
@@ -388,7 +421,9 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
   const viewBox = `${-extent.halfWidth} ${-extent.halfHeight} ${extent.halfWidth * 2} ${extent.halfHeight * 2}`;
 
   useEffect(() => {
-    const panel = side === 'self' ? 'self-hive' : 'opponent-hive';
+    const panel: BeePanel = isSelf
+      ? 'self-hive'
+      : (OPPONENT_PANELS[opponentIndex] ?? 'opponent-hive-right');
     registerGrid(panel, {
       el: svgRef.current,
       viewBoxHalfWidth: extent.halfWidth,
@@ -396,7 +431,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
       hexSize: HEX_SIZE,
     });
     return () => unregisterGrid(panel);
-  }, [side, extent.halfWidth, extent.halfHeight]);
+  }, [isSelf, opponentIndex, extent.halfWidth, extent.halfHeight]);
 
   // Wheel zoom (desktop / trackpad); non-passive so we can prevent page scroll.
   useEffect(() => {
@@ -455,7 +490,7 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
     };
   }, []);
 
-  const interactive = side === 'self';
+  const interactive = isSelf;
 
   const handlePointerDown = (
     e: React.PointerEvent<SVGPathElement>,
@@ -594,11 +629,29 @@ export const HiveGrid = ({ side, honeyLabel }: Props) => {
 
   tileByKeyRef.current = new Map(positioned.map((t) => [hexKey(t.hex), t]));
 
+  if (isEmptySlot) {
+    return (
+      <div className="hive-grid hive-grid--empty">
+        <p className="hive-grid-empty-label">No rival in this slot</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="grid-frame grid-frame--hive">
-      <h2 className="hud-title grid-heading">{side === 'self' ? 'YOUR HIVE' : 'RIVAL HIVE'}</h2>
-      {side === 'self' && honeyLabel}
-      {side === 'self' && (
+    <div
+      className={[
+        'grid-frame',
+        'grid-frame--hive',
+        isEliminatedRival ? 'grid-frame--rival-eliminated' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+    >
+      <h2 className="hud-title grid-heading">
+        {isSelf ? 'YOUR HIVE' : isEliminatedRival ? 'RIVAL HIVE (eliminated)' : 'RIVAL HIVE'}
+      </h2>
+      {isSelf && honeyLabel}
+      {isSelf && (
         <p className="grid-subtitle">
           hold a frontier tile {holdSeconds}s to build · {carpenterCost}🜨
         </p>
