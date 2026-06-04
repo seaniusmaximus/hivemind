@@ -1,5 +1,6 @@
 import type { Hex } from './hex.js';
 import type { Letter } from './letters.js';
+import type { SpecialTileKind } from './specialTiles.js';
 import type { QueenAttackSide } from './messages.js';
 
 export type BeeKind = 'worker' | 'carpenter' | 'drone' | 'queen';
@@ -46,8 +47,8 @@ export const BEE_STATS: Readonly<Record<BeeKind, BeeStats>> = {
  *   - 1 for every owned tile that is *not* the central hive and *not* a
  *     letter-storage slot (i.e. active / letter / capped tiles).
  *   So a fresh hive (1 hive + 6 storage + 12 active) starts at
- *   `5 + 12 = 17`. Carpenters grow the cap by adding active tiles; queen
- *   damage shrinks it by destroying them.
+ *   `5 + 12 = 17`. Carpenters grow the cap by adding active tiles; losing
+ *   hives or honeycomb tiles shrinks it.
  */
 export const HIVE = {
   startingHoney: 5,
@@ -58,13 +59,6 @@ export const HIVE = {
   /** Capacity contributed by the central hive tile itself. */
   hiveStorage: 5,
 } as const;
-
-/**
- * Owned hexes required per additional queen slot. A player can have one queen
- * active at a time by default, plus one extra for every full multiple of
- * {@link HEXES_PER_QUEEN_SLOT} hexes they own. Big hives field swarms.
- */
-export const HEXES_PER_QUEEN_SLOT = 12;
 
 /**
  * Minimum owned hive hexes before a player may dispatch a queen (early-game
@@ -84,6 +78,8 @@ export const FLIGHT_TIMES = {
   /** Drone time to walk a single word path. Total cap time scales with path count. */
   cappingPerPath: 1.4,
   queenToHive: 10,
+  /** Second leg: inward void gap → hive core when breaching through storage. */
+  queenVoidToHive: 2.5,
 } as const;
 
 /** Rival hive panels positioned around the flower field. */
@@ -132,8 +128,9 @@ export type BeeState =
   | {
       readonly kind: 'worker-flying-to-door-carrying';
       readonly queue: readonly Hex[];
-      readonly carrying: Letter;
-      /** Preferred storage hex; letter is applied on arrival at the hive door. */
+      readonly carrying?: Letter;
+      readonly carryingSpecial?: SpecialTileKind;
+      /** Preferred storage hex; payload is applied on arrival at the hive door. */
       readonly dropTile: Hex;
       readonly flight: BeeFlight;
     }
@@ -151,6 +148,8 @@ export type BeeState =
       readonly queue: readonly Hex[];
       readonly target: Hex;
       readonly flight: BeeFlight;
+      /** Hammer special: chain outward one tile at a time until {@link PlayerState.hammerExpansionUntil}. */
+      readonly hammerExpansion?: true;
     }
   | {
       readonly kind: 'carpenter-returning';
@@ -170,8 +169,14 @@ export type BeeState =
       readonly assaultPanel: HiveAssaultPanel;
       /** Player id of the hive being assaulted. */
       readonly defenderPlayerId: string;
-      /** Hex on the defender's grid where the queen lands. */
+      /** Hex on the defender's grid where assault begins (hive core or breach tile). */
       readonly landingHex: Hex;
+      /** Perimeter / corridor hex chosen at dispatch; used for in-flight retargeting. */
+      readonly breachHex?: Hex;
+      /** Inward void gap the queen flies to before the hive core (hive-ingress flights). */
+      readonly approachVoidHex?: Hex;
+  /** `ingress`: first leg (void gap or breach); `to-hive`: final dive to {@link landingHex}. */
+  readonly flightPhase?: 'ingress' | 'to-hive';
       /** When set, in-flight retargeting stays on this attack side. */
       readonly attackSide?: QueenAttackSide;
       /** Inward void hex keys along the approach at dispatch (rebuilt-tile retarget). */

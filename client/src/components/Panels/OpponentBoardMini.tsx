@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   axialToPixel,
   hexKey,
+  queenAssaultHighlightHex,
   type QueenAttackSide,
   type TileSnapshot,
 } from '@hivemind/shared';
@@ -78,6 +79,16 @@ const SIDE_LABEL: Record<QueenAttackSide, string> = {
   left: 'LEFT',
 };
 
+const rivalDisplayName = (
+  rivalId: string | undefined,
+  roomPlayers: ReadonlyArray<{ readonly id: string; readonly name: string }> | undefined,
+): string => {
+  if (!rivalId) return 'Rival';
+  const fromRoom = roomPlayers?.find((p) => p.id === rivalId)?.name;
+  if (fromRoom) return fromRoom;
+  return 'Rival';
+};
+
 export const OpponentBoardMini = () => {
   const opponents = useGameStore((s) => s.world.opponents);
   const selectedRivalIndex = useGameStore((s) => s.selectedRivalIndex);
@@ -91,15 +102,13 @@ export const OpponentBoardMini = () => {
   const confirmQueenAttackSide = useGameStore((s) => s.confirmQueenAttackSide);
   const cancelQueenTargeting = useGameStore((s) => s.cancelQueenTargeting);
   const eliminatedPlayerIds = useGameStore((s) => s.world.eliminatedPlayerIds);
+  const selfPlayer = useGameStore((s) => s.world.self);
   const room = useGameStore((s) => s.room);
 
   const rival = opponents[selectedRivalIndex] ?? opponents[0];
   const attackTargetIndex = queenTargeting?.targetRivalIndex ?? selectedRivalIndex;
   const attackRival = opponents[attackTargetIndex] ?? rival;
-  const rivalName =
-    room?.players.find((p) => p.id === rival?.id)?.name ??
-    rival?.id.slice(0, 6) ??
-    'Rival';
+  const rivalName = rivalDisplayName(rival?.id, room?.players);
 
   const incomingQueenHexKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -111,12 +120,12 @@ export const OpponentBoardMini = () => {
           b.state.kind === 'queen-flying' &&
           b.state.defenderPlayerId === selfId
         ) {
-          keys.add(hexKey(b.state.landingHex));
+          keys.add(hexKey(queenAssaultHighlightHex(selfPlayer, b.state.landingHex)));
         }
       }
     }
     return keys;
-  }, [opponents, selfId, rival]);
+  }, [opponents, selfId, selfPlayer, rival]);
 
   useEffect(() => {
     if (opponents.length <= 1) return;
@@ -141,10 +150,7 @@ export const OpponentBoardMini = () => {
 
   const tiles = rival?.tiles ?? [];
 
-  const attackRivalName =
-    room?.players.find((p) => p.id === attackRival?.id)?.name ??
-    attackRival?.id.slice(0, 6) ??
-    'Rival';
+  const attackRivalName = rivalDisplayName(attackRival?.id, room?.players);
   const attackTiles = attackRival?.tiles ?? [];
 
   const expandUi =

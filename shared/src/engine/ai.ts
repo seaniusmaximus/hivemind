@@ -85,7 +85,7 @@ export const planWord = (player: PlayerState): PlannedWord | null => {
 
   const boardLettersByKey = new Map<string, { hex: Hex; letter: Letter; capped: boolean }>();
   for (const t of player.tiles) {
-    if (tileHasDraftableLetter(t)) {
+    if (tileHasDraftableLetter(t) && t.letter) {
       boardLettersByKey.set(hexKey(t.hex), {
         hex: t.hex,
         letter: t.letter,
@@ -598,7 +598,7 @@ export const tickSmartAi = (world: World, dt: number, rng: () => number): World 
         if (t.state === 'storage' && t.letter) incomingLetters.push(t.letter);
       }
       for (const b of ai.bees) {
-        if (b.state.kind === 'worker-flying-to-door-carrying') {
+        if (b.state.kind === 'worker-flying-to-door-carrying' && b.state.carrying) {
           incomingLetters.push(b.state.carrying);
         }
       }

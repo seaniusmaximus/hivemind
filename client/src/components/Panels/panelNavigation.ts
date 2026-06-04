@@ -91,3 +91,20 @@ export const applyPanelDirection = (
       return panelGoDown(panel, ctx);
   }
 };
+
+/** Whether a panel index is reachable in the current match (for jump buttons). */
+export const canNavigateToPanel = (index: PanelIndex, ctx: PanelNavContext): boolean => {
+  switch (index) {
+    case 0:
+    case 1:
+      return true;
+    case 2:
+      return ctx.rivalCount >= 1;
+    case 3:
+      return ctx.rivalCount >= 2;
+    case 4:
+      return ctx.rivalCount >= 3;
+    default:
+      return false;
+  }
+};

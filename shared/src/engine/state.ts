@@ -4,6 +4,9 @@
  *
  * Hive layout: each player starts with a single `'hive'` tile at axial (0,0),
  * 6 `'storage'` slots at radius 1, and 12 `'active'` tiles at radius 2.
+ * Additional hives are founded by capping a valid 6-letter word in a ring
+ * around a central hex; each hive grants one queen slot and six storage slots.
+ * A player is eliminated when they have no hive tiles left.
  * Carpenters expand the hive *outward indefinitely* — any hex adjacent to your
  * active/letter/capped tiles is a "frontier" hex that can be activated. A
  * hold-to-send spends honey; capping a word with a drone also schedules one
@@ -36,7 +39,6 @@
 import {
   BEE_STATS,
   FLIGHT_TIMES,
-  HEXES_PER_QUEEN_SLOT,
   HIVE,
   QUEEN_MIN_OWNED_HEXES,
   WORKER_HOLD_SECONDS,
@@ -60,11 +62,26 @@ import {
   isValidPath,
   neighbors,
   range,
+  ringCenterForPath,
   type Hex,
 } from '../hex.js';
 import { isBeeRelatedWord } from '../beeWords.js';
+import { isWord } from '../dictionary.js';
 import { honeyForCappedWord, recordBestWord, wordScore } from '../scoring.js';
-import { hexHpForTile, remainingHpForTile } from '../tileHp.js';
+import { hexHpForTile, isQueenAssaultableTile, remainingHpForTile } from '../tileHp.js';
+import {
+  CASTLE_FORTIFICATION_BONUS,
+  CROWN_QUEEN_DAMAGE_BONUS,
+  CROWN_QUEEN_INTERVAL_REDUCTION,
+  drawSpecialTileKind,
+  HAMMER_EXPANSION_SECONDS,
+  resolveWordFromPath,
+  SPECIAL_FLOWER_CHANCE,
+  specialEffectEligible,
+  tileHasDraftableContent,
+  wordSignatureForPath,
+  type SpecialTileKind,
+} from '../specialTiles.js';
 import { tickSmartAi, type AiDifficulty } from './ai.js';
 
 export type { AiDifficulty } from './ai.js';
@@ -131,8 +148,6 @@ export type BuildInitialWorldIds =
 /** Initial radius of the player hive (rings 0..2 are seeded). Carpenters grow
  *  the hive outward beyond this without bound. */
 export const HIVE_RADIUS = 2;
-/** Letter-storage slots seeded at hive ring 1 in {@link buildPlayer}. */
-const STORAGE_SLOT_COUNT = 6;
 /** Radius of the central flower field. Larger than before to fit 3 patches
  *  (each is 7 hexes) with enough breathing room. */
 export const FIELD_RADIUS = 4;
@@ -211,11 +226,14 @@ export const pickQueenLandingHexForSide = (
 ): Hex | null => {
   const ring = queenPerimeterLandingHexKeys(defender);
   const perimeterTiles = defender.tiles.filter(
-    (t) => ring.has(hexKey(t.hex)) && t.state !== 'hive' && t.state !== 'inactive',
+    (t) =>
+      ring.has(hexKey(t.hex)) &&
+      t.state !== 'hive' &&
+      t.state !== 'inactive' &&
+      t.state !== 'storage',
   );
   if (perimeterTiles.length === 0) return null;
 
-  const origin = hex(0, 0);
   const dir =
     attackSide === 'top'
       ? { x: 0, y: -1 }
@@ -228,7 +246,7 @@ export const pickQueenLandingHexForSide = (
   const scored = perimeterTiles.map((t) => {
     const { x, y } = axialToPixel(t.hex, hexSize);
     const dot = x * dir.x + y * dir.y;
-    const d = cubeDistance(t.hex, origin);
+    const d = nearestHiveCenterDist(defender, t.hex);
     const hp = remainingHpForTile(t);
     return { t, dot, d, hp };
   });
@@ -248,15 +266,23 @@ export const pickQueenLandingHexForSide = (
   return pool[0]!.t.hex;
 };
 
-/** Weakest perimeter hex on the defender — closest to center, then lowest HP. */
+const nearestHiveCenterDist = (defender: PlayerState, h: Hex): number => {
+  const centers = hiveCentersFor(defender);
+  if (centers.length === 0) return Infinity;
+  return Math.min(...centers.map((c) => cubeDistance(h, c)));
+};
+
+/** Weakest perimeter hex on the defender — closest to a hive core, then lowest HP. */
 const pickQueenLandingHex = (defender: PlayerState): Hex | null => {
   const ring = queenPerimeterLandingHexKeys(defender);
-  const candidates = defender.tiles.filter((t) => ring.has(hexKey(t.hex)));
+  const candidates = defender.tiles.filter(
+    (t) => ring.has(hexKey(t.hex)) && t.state !== 'storage',
+  );
   if (candidates.length === 0) return null;
   return candidates
     .sort((a, b) => {
-      const da = cubeDistance(a.hex, hex(0, 0));
-      const db = cubeDistance(b.hex, hex(0, 0));
+      const da = nearestHiveCenterDist(defender, a.hex);
+      const db = nearestHiveCenterDist(defender, b.hex);
       if (da !== db) return da - db;
       const hpDiff = remainingHpForTile(a) - remainingHpForTile(b);
       if (hpDiff !== 0) return hpDiff;
@@ -264,10 +290,14 @@ const pickQueenLandingHex = (defender: PlayerState): Hex | null => {
     })[0]!.hex;
 };
 
-/** Defender hex the queen may land on — any owned non-hive tile (in-flight retarget checks). */
+/** Defender hex the queen may land on for ingress (storage is pass-through only). */
 const isQueenLandingHex = (defender: PlayerState, h: Hex): boolean =>
   defender.tiles.some(
-    (t) => hexEquals(t.hex, h) && t.state !== 'hive' && t.state !== 'inactive',
+    (t) =>
+      hexEquals(t.hex, h) &&
+      t.state !== 'hive' &&
+      t.state !== 'inactive' &&
+      t.state !== 'storage',
   );
 
 /** Player-chosen spawn target: outer ring only (matches {@link pickQueenLandingHex} set). */
@@ -281,6 +311,282 @@ const pickQueenPerimeterLanding = (
   attackSide !== undefined
     ? pickQueenLandingHexForSide(defender, attackSide)
     : pickQueenLandingHex(defender);
+
+const queenRingDist = (h: Hex, goals: readonly Hex[]): number =>
+  Math.min(...goals.map((g) => cubeDistance(h, g)));
+
+const isVoidHex = (defender: PlayerState, h: Hex): boolean =>
+  !defender.tiles.some((t) => hexEquals(t.hex, h));
+
+/** Void cells beside the hive core or storage ring — entry to strike the hive. */
+const queenInnerVoidGateKeys = (defender: PlayerState): Set<string> => {
+  const keys = new Set<string>();
+  for (const t of defender.tiles) {
+    if (t.state !== 'hive' && t.state !== 'storage') continue;
+    for (const n of neighbors(t.hex)) {
+      if (isVoidHex(defender, n)) keys.add(hexKey(n));
+    }
+  }
+  return keys;
+};
+
+/** BFS through empty (void) hexes only — owned tiles do not count as corridor. */
+const queenVoidDistances = (defender: PlayerState): Map<string, number> => {
+  const anchor = hiveCentersFor(defender)[0] ?? hex(0, 0);
+  const maxHullRadius = defender.tiles.reduce((m, t) => {
+    const d = cubeDistance(t.hex, anchor);
+    return Math.max(m, d);
+  }, 0);
+  const maxVoidReach = Math.max(maxHullRadius + 32, 32);
+  const visitBudget = Math.min(60_000, defender.tiles.length * 96 + 2_048);
+  const tileByKey = new Set(defender.tiles.map((t) => hexKey(t.hex)));
+
+  const dist = new Map<string, number>();
+  const q: Hex[] = [];
+  for (let dq = -maxVoidReach; dq <= maxVoidReach; dq++) {
+    for (let dr = Math.max(-maxVoidReach, -dq - maxVoidReach); dr <= Math.min(maxVoidReach, -dq + maxVoidReach); dr++) {
+      const h = { q: anchor.q + dq, r: anchor.r + dr };
+      if (cubeDistance(h, anchor) > maxVoidReach) continue;
+      const k = hexKey(h);
+      if (tileByKey.has(k) || dist.has(k)) continue;
+      dist.set(k, 0);
+      q.push(h);
+    }
+  }
+
+  let visits = 0;
+  while (q.length > 0 && visits < visitBudget) {
+    visits++;
+    const cur = q.shift()!;
+    const dc = dist.get(hexKey(cur))!;
+    for (const nbr of neighbors(cur)) {
+      const nk = hexKey(nbr);
+      if (dist.has(nk)) continue;
+      if (cubeDistance(nbr, anchor) > maxVoidReach) continue;
+      if (!isVoidHex(defender, nbr)) continue;
+      dist.set(nk, dc + 1);
+      q.push(nbr);
+    }
+  }
+
+  return dist;
+};
+
+/** Distance through void from inner gate cells outward (BFS from gates through void only). */
+const queenVoidDistancesToInnerGates = (defender: PlayerState): Map<string, number> => {
+  const gates = queenInnerVoidGateKeys(defender);
+  const dist = new Map<string, number>();
+  const q: Hex[] = [];
+  for (const k of gates) {
+    const comma = k.indexOf(',');
+    if (comma < 0) continue;
+    const h: Hex = { q: Number(k.slice(0, comma)), r: Number(k.slice(comma + 1)) };
+    if (!isVoidHex(defender, h)) continue;
+    dist.set(k, 0);
+    q.push(h);
+  }
+  const visitBudget = Math.min(60_000, defender.tiles.length * 96 + 2_048);
+  let visits = 0;
+  while (q.length > 0 && visits < visitBudget) {
+    visits++;
+    const cur = q.shift()!;
+    const dc = dist.get(hexKey(cur))!;
+    for (const nbr of neighbors(cur)) {
+      const nk = hexKey(nbr);
+      if (dist.has(nk)) continue;
+      if (!isVoidHex(defender, nbr)) continue;
+      dist.set(nk, dc + 1);
+      q.push(nbr);
+    }
+  }
+  return dist;
+};
+
+const queenInnerVoidGateReachable = (defender: PlayerState): boolean => {
+  const exterior = queenVoidDistances(defender);
+  for (const k of queenInnerVoidGateKeys(defender)) {
+    if (exterior.has(k)) return true;
+  }
+  return false;
+};
+
+/** Hive may be struck when void hexes connect the outside to the inner gate (path may leave other owned tiles). */
+const queenHiveStrikeAllowed = (defender: PlayerState): boolean =>
+  queenInnerVoidGateReachable(defender);
+
+const queenPreferredHiveHex = (defender: PlayerState, goals: readonly Hex[]): Hex => goals[0]!;
+
+/** True when the queen may end a hop on `h` (storage is pass-through, never assaulted). */
+const queenCanStepOnto = (defender: PlayerState, h: Hex, _goals: readonly Hex[]): boolean => {
+  const tile = defender.tiles.find((t) => hexEquals(t.hex, h));
+  if (!tile) return true;
+  if (tile.state === 'storage') return true;
+  if (tile.state === 'hive') return queenHiveStrikeAllowed(defender);
+  return isQueenAssaultableTile(tile);
+};
+
+/** Nearest assaultable tile outside the hive core (never storage). */
+const queenNearestAssaultableTowardHive = (
+  defender: PlayerState,
+  from: Hex,
+): Hex | null => {
+  const goals = hiveCentersFor(defender);
+  if (goals.length === 0) return null;
+  let best: Hex | null = null;
+  let bestRing = Infinity;
+  let bestDist = Infinity;
+  const voidDist = queenVoidDistancesToInnerGates(defender);
+  const onCorridor = (hex: Hex): boolean =>
+    voidDist.has(hexKey(hex)) || neighbors(hex).some((n) => voidDist.has(hexKey(n)));
+
+  for (const t of defender.tiles) {
+    if (!isQueenAssaultableTile(t) || t.state === 'hive') continue;
+    if (!onCorridor(t.hex)) continue;
+    const ring = queenRingDist(t.hex, goals);
+    const d = cubeDistance(t.hex, from);
+    if (
+      best === null ||
+      ring < bestRing ||
+      (ring === bestRing && d < bestDist) ||
+      (ring === bestRing && d === bestDist && hexKey(t.hex).localeCompare(hexKey(best)) < 0)
+    ) {
+      bestRing = ring;
+      bestDist = d;
+      best = t.hex;
+    }
+  }
+  if (best) return best;
+
+  for (const t of defender.tiles) {
+    if (!isQueenAssaultableTile(t) || t.state === 'hive') continue;
+    const ring = queenRingDist(t.hex, goals);
+    const d = cubeDistance(t.hex, from);
+    if (
+      best === null ||
+      ring < bestRing ||
+      (ring === bestRing && d < bestDist) ||
+      (ring === bestRing && d === bestDist && hexKey(t.hex).localeCompare(hexKey(best)) < 0)
+    ) {
+      bestRing = ring;
+      bestDist = d;
+      best = t.hex;
+    }
+  }
+  return best;
+};
+
+const queenResolveNonStorageHex = (defender: PlayerState, h: Hex): Hex => {
+  const tile = defender.tiles.find((t) => hexEquals(t.hex, h));
+  if (tile?.state !== 'storage') return h;
+  const goals = hiveCentersFor(defender);
+  if (goals.length > 0 && queenHiveStrikeAllowed(defender)) {
+    return queenPreferredHiveHex(defender, goals);
+  }
+  return queenNearestAssaultableTowardHive(defender, h) ?? h;
+};
+
+/**
+ * Autonomous assault / flight goal. Never storage; hive when a void corridor
+ * reaches the inner gate from the breach.
+ */
+const queenAssaultGoalHex = (defender: PlayerState, breachLanding: Hex): Hex => {
+  const hiveGoals = hiveCentersFor(defender);
+  if (hiveGoals.length === 0) return breachLanding;
+
+  const landingTile = defender.tiles.find((t) => hexEquals(t.hex, breachLanding));
+  if (landingTile?.state === 'storage') {
+    return queenNearestAssaultableTowardHive(defender, breachLanding) ?? breachLanding;
+  }
+
+  if (
+    landingTile &&
+    isQueenAssaultableTile(landingTile) &&
+    landingTile.state !== 'hive'
+  ) {
+    return breachLanding;
+  }
+
+  if (queenHiveStrikeAllowed(defender)) {
+    return queenPreferredHiveHex(defender, hiveGoals);
+  }
+
+  return queenResolveNonStorageHex(defender, breachLanding);
+};
+
+/**
+ * Hex to pulse as the incoming queen target (UI). Never storage; highlights the
+ * hive when void reaches the inner gate.
+ */
+export const queenAssaultHighlightHex = (defender: PlayerState, landing: Hex): Hex => {
+  const hiveGoals = hiveCentersFor(defender);
+  if (hiveGoals.length === 0) return landing;
+
+  const landingTile = defender.tiles.find((t) => hexEquals(t.hex, landing));
+  if (
+    landingTile &&
+    isQueenAssaultableTile(landingTile) &&
+    landingTile.state !== 'hive'
+  ) {
+    return landing;
+  }
+
+  if (queenHiveStrikeAllowed(defender) || queenInnerVoidGateReachable(defender)) {
+    return queenPreferredHiveHex(defender, hiveGoals);
+  }
+
+  return queenResolveNonStorageHex(defender, landing);
+};
+
+/**
+ * Inward void cell beside `breachLanding` used as the first flight leg when
+ * {@link queenAssaultHighlightHex} targets a hive core through storage.
+ */
+export const queenApproachVoidHex = (
+  defender: PlayerState,
+  breachLanding: Hex,
+  assaultGoal: Hex,
+): Hex | null => {
+  if (hexEquals(breachLanding, assaultGoal)) return null;
+  if (!hiveCentersFor(defender).some((g) => hexEquals(g, assaultGoal))) return null;
+
+  const keys = queenApproachVoidHexKeys(defender, breachLanding);
+  if (keys.length === 0) return null;
+
+  let best: Hex | null = null;
+  let bestD = Infinity;
+  for (const k of keys) {
+    const comma = k.indexOf(',');
+    if (comma < 0) continue;
+    const h: Hex = { q: Number(k.slice(0, comma)), r: Number(k.slice(comma + 1)) };
+    const d = cubeDistance(h, assaultGoal);
+    if (best === null || d < bestD || (d === bestD && k.localeCompare(hexKey(best)) < 0)) {
+      bestD = d;
+      best = h;
+    }
+  }
+  return best;
+};
+
+const queenIngressFlightPlan = (
+  defender: PlayerState,
+  breachLanding: Hex,
+): {
+  readonly assaultGoal: Hex;
+  readonly approachVoid: Hex | null;
+  readonly twoPhase: boolean;
+  readonly ingressHex: Hex;
+} => {
+  const assaultGoal = queenAssaultGoalHex(defender, breachLanding);
+  const hiveIngress =
+    hiveCentersFor(defender).some((g) => hexEquals(g, assaultGoal)) &&
+    !hexEquals(assaultGoal, breachLanding);
+  if (!hiveIngress) {
+    return { assaultGoal, approachVoid: null, twoPhase: false, ingressHex: assaultGoal };
+  }
+  const approachVoid = queenApproachVoidHex(defender, breachLanding, assaultGoal);
+  const ingressHex = approachVoid ?? breachLanding;
+  return { assaultGoal, approachVoid, twoPhase: true, ingressHex };
+};
 
 /** Inward void cells beside `landing` at queen dispatch (for rebuild retarget). */
 export const queenApproachVoidHexKeys = (
@@ -464,13 +770,19 @@ export const honeyRateFor = (player: PlayerState): number => {
   return HIVE.regenPerHex * player.tiles.length + HIVE.cappedHoneyBonus * cappedCount;
 };
 
+/** Number of hive core tiles the player still controls. */
+export const hiveCountFor = (player: PlayerState): number =>
+  player.tiles.filter((t) => t.state === 'hive').length;
+
+/** Axial coords of every hive core tile. */
+export const hiveCentersFor = (player: PlayerState): readonly Hex[] =>
+  player.tiles.filter((t) => t.state === 'hive').map((t) => t.hex);
+
 /**
- * How many queens a player may have simultaneously airborne or assaulting.
- * One by default, plus one extra per full {@link HEXES_PER_QUEEN_SLOT} owned
- * hexes — bigger hives get to field swarms.
+ * How many queens a player may have simultaneously airborne or assaulting —
+ * one per hive core ({@link hiveCountFor}).
  */
-export const queenAllowanceFor = (player: PlayerState): number =>
-  1 + Math.floor(player.tiles.length / HEXES_PER_QUEEN_SLOT);
+export const queenAllowanceFor = (player: PlayerState): number => hiveCountFor(player);
 
 /** Count the player's queens currently in flight or mid-assault. */
 export const activeQueenCountFor = (player: PlayerState): number => {
@@ -575,26 +887,34 @@ const spawnPatch = (
   type: FlowerType,
   rng: () => number,
   spawnedAt: number,
-  opts?: { readonly pollenBloom?: boolean },
+  opts?: { readonly pollenBloom?: boolean; readonly allowSpecial?: boolean },
 ): FlowerPatch | null => {
   const free = freePatchCenters(existing, opts);
   if (free.length === 0) return null;
   const center = free[Math.floor(rng() * free.length)]!;
+  const isSpecial =
+    opts?.allowSpecial !== false && rng() < SPECIAL_FLOWER_CHANCE;
   // Spread petal wither times across [0.45, 1.0] of lifetime in random order so
   // the visual decay has organic timing.
   const order = neighbors(center)
     .map((h, i) => ({ h, i, sort: rng() }))
     .sort((a, b) => a.sort - b.sort)
     .map((x) => x.h);
-  const petals: Petal[] = order.map((h, i) => ({
-    hex: h,
-    letter: drawFlowerLetter(type, rng),
-    witherAt:
+  const petals: Petal[] = order.map((h, i) => {
+    const witherAt =
       spawnedAt +
       PATCH_LIFETIME_SECONDS *
         (0.45 + (0.55 * (i + 1)) / order.length) +
-      (rng() - 0.5) * 1.2,
-  }));
+      (rng() - 0.5) * 1.2;
+    if (isSpecial) {
+      return { hex: h, specialKind: drawSpecialTileKind(rng), witherAt };
+    }
+    return {
+      hex: h,
+      letter: drawFlowerLetter(type as Exclude<FlowerType, 'special'>, rng),
+      witherAt,
+    };
+  });
   return {
     id: newId(),
     type,
@@ -602,6 +922,7 @@ const spawnPatch = (
     petals,
     spawnedAt,
     lifetimeSeconds: PATCH_LIFETIME_SECONDS,
+    ...(isSpecial ? { specialFlower: true as const } : {}),
     ...(opts?.pollenBloom ? { pollenBloom: true as const } : {}),
   };
 };
@@ -625,23 +946,28 @@ const spawnSinglePetalBloom = (
   }
   if (slots.length === 0) return null;
   const pick = slots[Math.floor(rng() * slots.length)]!;
+  const isSpecial = rng() < SPECIAL_FLOWER_CHANCE;
+  const witherAt =
+    spawnedAt +
+    PATCH_LIFETIME_SECONDS * (0.75 + rng() * 0.25) +
+    (rng() - 0.5) * 1.2;
   return {
     id: newId(),
     type,
     center: pick.center,
-    petals: [
-      {
-        hex: pick.petal,
-        letter: drawFlowerLetter(type, rng),
-        witherAt:
-          spawnedAt +
-          PATCH_LIFETIME_SECONDS * (0.75 + rng() * 0.25) +
-          (rng() - 0.5) * 1.2,
-      },
-    ],
+    petals: isSpecial
+      ? [{ hex: pick.petal, specialKind: drawSpecialTileKind(rng), witherAt }]
+      : [
+          {
+            hex: pick.petal,
+            letter: drawFlowerLetter(type as Exclude<FlowerType, 'special'>, rng),
+            witherAt,
+          },
+        ],
     spawnedAt,
     lifetimeSeconds: PATCH_LIFETIME_SECONDS,
     pollenBloom: true,
+    ...(isSpecial ? { specialFlower: true as const } : {}),
   };
 };
 
@@ -715,12 +1041,12 @@ const extraCorePatchTypesNeeded = (
 const seedPatches = (rng: () => number, t: number, playerCount: number): FlowerPatch[] => {
   let result: FlowerPatch[] = [];
   for (const type of PATCH_TYPES) {
-    const p = spawnPatch(result, type, rng, t);
+    const p = spawnPatch(result, type, rng, t, { allowSpecial: false });
     if (!p) break;
     result.push(p);
   }
   for (const type of extraCorePatchTypesNeeded(result, playerCount)) {
-    const p = spawnPatch(result, type, rng, t);
+    const p = spawnPatch(result, type, rng, t, { allowSpecial: false });
     if (p) result.push(p);
   }
   return result;
@@ -940,14 +1266,17 @@ const flight = (
   arrivesAt: startedAt + duration,
 });
 
+const storageSlotEmpty = (t: TileSnapshot): boolean =>
+  t.state === 'storage' && !t.letter && !t.specialKind;
+
 /**
- * Pick the first empty storage slot (radius 1, state='storage', letter=null).
+ * Pick the first empty storage slot (radius 1, state='storage', no letter/special).
  * We iterate in axial order so deliveries fill predictably from the same place
  * each time — players can rely on a stable visual grouping.
  */
 const pickEmptyStorage = (player: PlayerState): TileSnapshot | null => {
   for (const t of player.tiles) {
-    if (t.state === 'storage' && !t.letter) return t;
+    if (storageSlotEmpty(t)) return t;
   }
   return null;
 };
@@ -987,6 +1316,7 @@ export const tickWorld = (
   }
   next = resolveArrivedBees(next, opts.clientPrediction ? undefined : rng);
   next = tickQueens(next);
+  next = clearExpiredHammerExpansion(next);
   next = tickFreedLetters(next);
   // Patch wither/spawn lives server-side in online mode — the snapshot will
   // overwrite `patches`, and locally-simulated spawns desync from the
@@ -1026,11 +1356,16 @@ const tickFreedLetters = (world: World): World => {
  * cycle so deaths visibly stagger.
  */
 const tickPatches = (world: World, dt: number, rng: () => number): World => {
-  const wilted: { type: FlowerType; letter: Letter }[] = [];
+  const wilted: { type: FlowerType; label: string }[] = [];
   let patches: FlowerPatch[] = world.patches.map((p) => {
     const surviving = p.petals.filter((pt) => pt.witherAt > world.t);
     for (const pt of p.petals) {
-      if (!surviving.includes(pt)) wilted.push({ type: p.type, letter: pt.letter });
+      if (!surviving.includes(pt)) {
+        wilted.push({
+          type: p.type,
+          label: pt.specialKind ?? pt.letter ?? '?',
+        });
+      }
     }
     return { ...p, petals: surviving };
   });
@@ -1057,7 +1392,7 @@ const tickPatches = (world: World, dt: number, rng: () => number): World => {
     // One log line per tick so we don't spam the activity feed.
     const summary = wilted
       .slice(0, 3)
-      .map((w) => w.letter)
+      .map((w) => w.label)
       .join(',');
     next = logEvent(next, {
       t: next.t,
@@ -1074,13 +1409,8 @@ const tickPatches = (world: World, dt: number, rng: () => number): World => {
  */
 export function tileHasDraftableLetter(
   tile: TileSnapshot | undefined,
-): tile is TileSnapshot & { letter: Letter } {
-  return (
-    !!tile?.letter &&
-    (tile.state === 'capped' ||
-      tile.state === 'letter' ||
-      (tile.state === 'active' && !!tile.letter))
-  );
+): tile is TileSnapshot {
+  return tileHasDraftableContent(tile);
 }
 
 // ---- Bee resolution --------------------------------------------------------
@@ -1123,29 +1453,59 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
       if (bee.state.kind === 'queen-flying') {
         const defender = getPlayer(world, bee.state.defenderPlayerId);
         const f = bee.state.flight;
-        const landing = bee.state.landingHex;
-        const desired =
+        const breach = bee.state.breachHex ?? bee.state.landingHex;
+        const corridor =
           pickQueenLandingHexWhileFlying(
             defender,
-            landing,
+            breach,
             bee.state.attackSide,
             bee.state.approachVoidHexKeys,
-          ) ?? landing;
-        if (!isQueenLandingHex(defender, desired)) {
+          ) ?? breach;
+        const plan = queenIngressFlightPlan(defender, corridor);
+
+        if (bee.state.flightPhase === 'to-hive') {
+          const needHiveRetarget = !hexEquals(plan.assaultGoal, bee.state.landingHex);
+          const nextState = needHiveRetarget
+            ? { ...bee.state, landingHex: plan.assaultGoal }
+            : bee.state;
+          if (needHiveRetarget) beesChanged = true;
+          remainingBees.push({ ...bee, state: nextState });
+          continue;
+        }
+
+        if (!plan.twoPhase && !isQueenLandingHex(defender, plan.assaultGoal)) {
           beesChanged = true;
           continue;
         }
+
+        const flightTo = plan.twoPhase ? plan.ingressHex : plan.assaultGoal;
         const needRetarget =
-          !hexEquals(desired, landing) || !hexEquals(desired, f.to.hex);
-        const nextState = needRetarget
-          ? {
-              ...bee.state,
-              landingHex: desired,
-              flight: {
-                ...f,
-                to: { panel: bee.state.assaultPanel, hex: desired },
-              },
-            }
+          !hexEquals(plan.assaultGoal, bee.state.landingHex) ||
+          !hexEquals(flightTo, f.to.hex) ||
+          !hexEquals(corridor, breach) ||
+          (plan.twoPhase &&
+            (bee.state.flightPhase !== 'ingress' ||
+              !hexEquals(flightTo, plan.ingressHex)));
+
+        const nextState: typeof bee.state = needRetarget
+          ? (() => {
+              const { approachVoidHex: _dropVoid, flightPhase: _dropPhase, ...base } = bee.state;
+              return {
+                ...base,
+                breachHex: corridor,
+                landingHex: plan.assaultGoal,
+                ...(plan.twoPhase
+                  ? {
+                      flightPhase: 'ingress' as const,
+                      ...(plan.approachVoid ? { approachVoidHex: plan.approachVoid } : {}),
+                    }
+                  : {}),
+                flight: {
+                  ...f,
+                  to: { panel: bee.state.assaultPanel, hex: flightTo },
+                },
+              };
+            })()
           : bee.state;
         if (needRetarget) beesChanged = true;
         remainingBees.push({ ...bee, state: nextState });
@@ -1219,11 +1579,12 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
         updatedPatches = removePetal(updatedPatches, found.patch.id, target);
         const drop = pickEmptyStorage(updatedPlayer);
         if (!drop) {
-          // Storage is full — letter is wasted; head home.
+          // Storage is full — payload is wasted; head home.
+          const lostLabel = found.petal.specialKind ?? found.petal.letter ?? '?';
           next = logEvent(next, {
             t: next.t,
             ownerId: player.id,
-            text: `storage full, ${found.petal.letter} lost`,
+            text: `storage full, ${lostLabel} lost`,
           });
           remainingBees.push({
             ...bee,
@@ -1240,12 +1601,15 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
             },
           });
         } else {
+          const carryingSpecial = found.petal.specialKind;
           remainingBees.push({
             ...bee,
             state: {
               kind: 'worker-flying-to-door-carrying',
               queue: bee.state.queue,
-              carrying: found.petal.letter,
+              ...(carryingSpecial
+                ? { carryingSpecial }
+                : { carrying: found.petal.letter! }),
               dropTile: drop.hex,
               flight: flight(
                 'flowers',
@@ -1260,7 +1624,7 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
           next = logEvent(next, {
             t: next.t,
             ownerId: player.id,
-            text: `${found.petal.letter} grabbed`,
+            text: `${carryingSpecial ?? found.petal.letter} grabbed`,
           });
         }
         beesChanged = true;
@@ -1312,40 +1676,46 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
 
     if (bee.state.kind === 'worker-flying-to-door-carrying') {
       const dropTile = bee.state.dropTile;
+      const specialKind = bee.state.carryingSpecial;
       const letter = bee.state.carrying;
-      // Letter lands when the bee reaches the hive door — no separate hop to a storage hex.
       const tile = updatedPlayer.tiles.find((t) => hexEquals(t.hex, dropTile));
-      if (tile && tile.state === 'storage' && !tile.letter) {
+      const storePayload = (hexTarget: Hex): void => {
         updatedPlayer = {
           ...updatedPlayer,
-          tiles: updatedPlayer.tiles.map((t) =>
-            hexEquals(t.hex, dropTile) ? { ...t, letter } : t,
-          ),
+          tiles: updatedPlayer.tiles.map((t) => {
+            if (!hexEquals(t.hex, hexTarget)) return t;
+            if (specialKind) {
+              return {
+                ...t,
+                specialKind,
+                ...(specialKind === 'bomb' ? { bombOwnerId: player.id } : {}),
+              };
+            }
+            return { ...t, letter: letter! };
+          }),
         };
+      };
+      if (tile && storageSlotEmpty(tile)) {
+        storePayload(dropTile);
         next = logEvent(next, {
           t: next.t,
           ownerId: player.id,
-          text: `${letter} stored`,
+          text: `${specialKind ?? letter} stored`,
         });
       } else {
         const fallback = pickEmptyStorage(updatedPlayer);
         if (fallback) {
-          updatedPlayer = {
-            ...updatedPlayer,
-            tiles: updatedPlayer.tiles.map((t) =>
-              hexEquals(t.hex, fallback.hex) ? { ...t, letter } : t,
-            ),
-          };
+          storePayload(fallback.hex);
           next = logEvent(next, {
             t: next.t,
             ownerId: player.id,
-            text: `${letter} stored`,
+            text: `${specialKind ?? letter} stored`,
           });
         } else {
           next = logEvent(next, {
             t: next.t,
             ownerId: player.id,
-            text: `${letter} lost`,
+            text: `${specialKind ?? letter} lost`,
           });
         }
       }
@@ -1451,39 +1821,54 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
     if (bee.state.kind === 'capping') {
       const paths = bee.state.paths;
       const wordsLetters: Letter[][] = [];
+      const successfulPaths: (readonly Hex[])[] = [];
+      const resolvedByPath = new Map<
+        readonly Hex[],
+        { readonly word: string; readonly resolvedByHex: ReadonlyMap<string, Letter> }
+      >();
       /** True when this path used at least one hex already `capped` before this cap (branch reuse). */
       const crossesPriorCappedByWord: boolean[] = [];
       const allCappedHexes: Hex[] = [];
       const reuseIncrementsByKey = new Map<string, number>();
       for (const path of paths) {
-        const letters: Letter[] = [];
+        const resolved = resolveWordFromPath(path, updatedPlayer.tiles);
+        if (!resolved || path.length < 2) {
+          next = logEvent(next, {
+            t: next.t,
+            ownerId: player.id,
+            text: `word missed`,
+          });
+          continue;
+        }
         let valid = true;
         const cappedHitsThisPath: Hex[] = [];
         for (const h of path) {
           const tile = updatedPlayer.tiles.find((t) => hexEquals(t.hex, h));
-          if (!tile || !tileHasDraftableLetter(tile)) {
+          if (!tile || !tileHasDraftableContent(tile)) {
             valid = false;
             break;
           }
-          letters.push(tile.letter);
           if (tile.state === 'capped') cappedHitsThisPath.push(h);
         }
-        if (valid && letters.length >= 2) {
-          wordsLetters.push(letters);
-          crossesPriorCappedByWord.push(cappedHitsThisPath.length > 0);
-          for (const h of path) {
-            if (!allCappedHexes.some((c) => hexEquals(c, h))) allCappedHexes.push(h);
-          }
-          for (const h of cappedHitsThisPath) {
-            const k = hexKey(h);
-            reuseIncrementsByKey.set(k, (reuseIncrementsByKey.get(k) ?? 0) + 1);
-          }
-        } else {
+        if (!valid) {
           next = logEvent(next, {
             t: next.t,
             ownerId: player.id,
-            text: `${letters.join('') || 'word'} missed`,
+            text: `${resolved.word} missed`,
           });
+          continue;
+        }
+        const letters = path.map((h) => resolved.resolvedByHex.get(hexKey(h))!);
+        wordsLetters.push(letters);
+        successfulPaths.push(path);
+        resolvedByPath.set(path, resolved);
+        crossesPriorCappedByWord.push(cappedHitsThisPath.length > 0);
+        for (const h of path) {
+          if (!allCappedHexes.some((c) => hexEquals(c, h))) allCappedHexes.push(h);
+        }
+        for (const h of cappedHitsThisPath) {
+          const k = hexKey(h);
+          reuseIncrementsByKey.set(k, (reuseIncrementsByKey.get(k) ?? 0) + 1);
         }
       }
       if (wordsLetters.length > 0) {
@@ -1497,6 +1882,14 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
             s + honeyForCappedWord(letters, crossesPriorCappedByWord[i] ?? false),
           0,
         );
+        const resolvedLookup = new Map<string, Letter>();
+        for (const path of successfulPaths) {
+          const resolved = resolvedByPath.get(path)!;
+          for (const h of path) {
+            resolvedLookup.set(hexKey(h), resolved.resolvedByHex.get(hexKey(h))!);
+          }
+        }
+        const tilesBeforeCap = updatedPlayer.tiles;
         updatedPlayer = {
           ...updatedPlayer,
           tiles: updatedPlayer.tiles.map((t) => {
@@ -1504,13 +1897,59 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
             const shouldCap = allCappedHexes.some((h) => hexEquals(h, t.hex));
             const reuseInc = reuseIncrementsByKey.get(k) ?? 0;
             if (!shouldCap && reuseInc === 0) return t;
+            const resolvedLetter = resolvedLookup.get(k);
+            const beforeCap = tilesBeforeCap.find((x) => hexEquals(x.hex, t.hex));
+            if (
+              shouldCap &&
+              t.specialKind === 'bomb' &&
+              resolvedLetter &&
+              specialEffectEligible(beforeCap ?? t)
+            ) {
+              return {
+                ...t,
+                state: 'capped' as const,
+                letter: null,
+                specialKind: 'bomb' as const,
+                bombOwnerId: player.id,
+                resolvedLetter,
+                specialSpent: true as const,
+                reuseCount: (t.reuseCount ?? 0) + reuseInc,
+              };
+            }
+            if (shouldCap) {
+              const capped = {
+                state: 'capped' as const,
+                letter: t.letter ?? resolvedLetter ?? null,
+                reuseCount: (t.reuseCount ?? 0) + reuseInc,
+              };
+              if (t.specialKind && t.specialKind !== 'bomb') {
+                return stripSpecialTileFields(t, capped);
+              }
+              return { ...t, ...capped };
+            }
             return {
               ...t,
-              state: shouldCap ? 'capped' : t.state,
               reuseCount: (t.reuseCount ?? 0) + reuseInc,
             };
           }),
         };
+        let hammerStart: Hex | null = null;
+        for (const path of successfulPaths) {
+          const resolved = resolvedByPath.get(path)!;
+          const fx = applySpecialCapEffects(
+            updatedPlayer,
+            path,
+            resolved.resolvedByHex,
+            player.id,
+            next.t,
+            tilesBeforeCap,
+          );
+          updatedPlayer = fx.player;
+          if (fx.hammerStart) hammerStart = fx.hammerStart;
+        }
+        const hivesBefore = hiveCountFor(updatedPlayer);
+        updatedPlayer = applySatelliteHiveSpawns(updatedPlayer, successfulPaths, wordsLetters);
+        const hivesFounded = hiveCountFor(updatedPlayer) - hivesBefore;
         updatedPlayer = grantHoney(updatedPlayer, bonus);
         for (let wi = 0; wi < wordsLetters.length; wi++) {
           updatedPlayer = recordBestWord(
@@ -1525,10 +1964,11 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
         );
         const reuseTag = crossesPriorCappedByWord.some(Boolean) ? ' reuse!' : '';
         const beeTag = beeBloom ? ' pollen bloom!' : '';
+        const hiveTag = hivesFounded > 0 ? ` +${hivesFounded} hive!` : '';
         next = logEvent(next, {
           t: next.t,
           ownerId: player.id,
-          text: `${summary} +${bonus} 🜨${reuseTag}${beeTag}`,
+          text: `${summary} +${bonus} 🜨${reuseTag}${beeTag}${hiveTag}`,
         });
         if (beeBloom && rng) {
           const bloomPatches = spawnPollenBloomPatches(
@@ -1596,6 +2036,19 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
             },
           });
         }
+        if (hammerStart && !reservedCarpenterTargets.has(hexKey(hammerStart))) {
+          reservedCarpenterTargets.add(hexKey(hammerStart));
+          remainingBees.push(
+            spawnHammerCarpenter(
+              player.id,
+              hivePanel,
+              hex(0, 0),
+              hammerStart,
+              next.t,
+              true,
+            ),
+          );
+        }
       }
       beesChanged = true;
       continue;
@@ -1658,6 +2111,7 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
       }
       const newCapacity = bee.capacity - 1;
       const [nextTarget, ...rest] = bee.state.queue;
+      const isHammerBee = bee.state.hammerExpansion === true;
       if (newCapacity > 0 && nextTarget) {
         reservedCarpenterTargets.add(hexKey(nextTarget));
         for (const qh of rest) reservedCarpenterTargets.add(hexKey(qh));
@@ -1678,6 +2132,42 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
             ),
           },
         });
+      } else if (
+        isHammerBee &&
+        updatedPlayer.hammerExpansionUntil !== undefined &&
+        next.t < updatedPlayer.hammerExpansionUntil
+      ) {
+        updatedPlayer = markHammerHexVisited(updatedPlayer, target);
+        const nextHex = pickNextHammerExpansionHex(updatedPlayer);
+        if (nextHex && !reservedCarpenterTargets.has(hexKey(nextHex))) {
+          reservedCarpenterTargets.add(hexKey(nextHex));
+          remainingBees.push(
+            spawnHammerCarpenter(
+              player.id,
+              hivePanel,
+              target,
+              nextHex,
+              next.t,
+              false,
+            ),
+          );
+        } else {
+          remainingBees.push({
+            ...bee,
+            capacity: newCapacity,
+            state: {
+              kind: 'carpenter-returning',
+              flight: flight(
+                hivePanel,
+                target,
+                hivePanel,
+                hex(0, 0),
+                next.t,
+                FLIGHT_TIMES.tileToHive,
+              ),
+            },
+          });
+        }
       } else {
         remainingBees.push({
           ...bee,
@@ -1709,16 +2199,51 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
         beesChanged = true;
         continue;
       }
+      if (bee.state.flightPhase === 'ingress') {
+        const ingressHex = bee.state.flight.to.hex;
+        const hiveHex = bee.state.landingHex;
+        remainingBees.push({
+          ...bee,
+          state: {
+            ...bee.state,
+            flightPhase: 'to-hive',
+            flight: flight(
+              bee.state.assaultPanel,
+              ingressHex,
+              bee.state.assaultPanel,
+              hiveHex,
+              next.t,
+              FLIGHT_TIMES.queenVoidToHive,
+            ),
+          },
+        });
+        next = logEvent(next, {
+          t: next.t,
+          ownerId: player.id,
+          text: `queen dives`,
+        });
+        beesChanged = true;
+        continue;
+      }
       // Arrived at the opponent grid — switch to autonomous assault. The first
       // attack lands a short beat after touchdown so the player can register
       // the hand-off visually.
+      const assaultDefender = getPlayer(next, bee.state.defenderPlayerId);
+      const touchdownRaw =
+        bee.state.flightPhase === 'to-hive'
+          ? bee.state.landingHex
+          : (bee.state.breachHex ?? bee.state.landingHex);
+      const touchdownHex = queenPassThroughStorage(
+        assaultDefender,
+        queenAssaultGoalHex(assaultDefender, touchdownRaw),
+      );
       remainingBees.push({
         ...bee,
         state: {
           kind: 'queen-assault',
           panel: bee.state.assaultPanel,
           defenderPlayerId: bee.state.defenderPlayerId,
-          currentHex: bee.state.landingHex,
+          currentHex: touchdownHex,
           expiresAt: next.t + QUEEN_ASSAULT_DURATION_SECONDS,
           nextActionAt: next.t + 0.45,
         },
@@ -1749,88 +2274,558 @@ const resolvePlayerBees = (world: World, playerId: string, rng?: () => number): 
 };
 
 /**
- * Pick a neighbour of `from` that starts a shortest walk to the hive in axial steps.
- *
- * Nodes are hive centre, every defender-owned hex, and any **void** coord (tile
- * already destroyed). Edges join 6-neighbours; capped so runaway axial void
- * cannot drain BFS indefinitely.
- *
- * Steps along that shortest path minimise travel through defender territory /
- * corridors the queen clears.
+ * Queens never occupy storage: slide through any storage chain toward the hive
+ * in a single action so they cannot get stuck striking storage tiles.
  */
-const shortestQueenHopTowardHive = (defender: PlayerState, from: Hex): Hex | null => {
-  const goal = hex(0, 0);
-  const tileByHex = new Map(defender.tiles.map((t) => [hexKey(t.hex), t]));
-  const goalKey = hexKey(goal);
-  if (!tileByHex.has(goalKey)) return null;
+const queenPassThroughStorage = (defender: PlayerState, start: Hex): Hex => {
+  let cur = start;
+  for (let guard = 0; guard < 24; guard++) {
+    const here = defender.tiles.find((t) => hexEquals(t.hex, cur));
+    if (!here || here.state !== 'storage') return cur;
+    const next = shortestQueenHopTowardHiveInner(defender, cur);
+    if (!next || hexEquals(next, cur)) return cur;
+    cur = next;
+  }
+  return cur;
+};
 
-  const maxHullRadius = defender.tiles.reduce((m, t) => Math.max(m, cubeDistance(t.hex, goal)), 0);
-  /** Allowed void exploration past the farthest hive ring (narrow carved tunnels). */
-  const maxVoidReach = Math.max(maxHullRadius + 32, 32);
-  /** Hard cap unrelated to hive distance so pathological void chains cannot churn. */
-  const visitBudget = Math.min(60_000, defender.tiles.length * 96 + 2_048);
+const queenVoidHopScore = (
+  voidDist: Map<string, number>,
+  h: Hex,
+  goals: readonly Hex[],
+): number => {
+  const d = voidDist.get(hexKey(h));
+  if (d !== undefined) return d;
+  return queenRingDist(h, goals) + 10_000;
+};
 
-  const dist = new Map<string, number>();
-  dist.set(goalKey, 0);
-  const q: Hex[] = [goal];
-  let visits = 0;
+const queenPickBetterHop = (
+  voidDist: Map<string, number>,
+  goals: readonly Hex[],
+  best: Hex | null,
+  bestScore: number,
+  candidate: Hex,
+): { best: Hex | null; bestScore: number } => {
+  const score = queenVoidHopScore(voidDist, candidate, goals);
+  const ck = hexKey(candidate);
+  if (
+    best === null ||
+    score < bestScore ||
+    (score === bestScore &&
+      (queenRingDist(candidate, goals) < queenRingDist(best, goals) ||
+        (queenRingDist(candidate, goals) === queenRingDist(best, goals) &&
+          ck.localeCompare(hexKey(best)) < 0)))
+  ) {
+    return { best: candidate, bestScore: score };
+  }
+  return { best, bestScore };
+};
 
-  while (q.length > 0 && visits < visitBudget) {
-    visits++;
-    const cur = q.shift()!;
-    const dc = dist.get(hexKey(cur))!;
-      const nextDc = dc + 1;
+/**
+ * Next hop toward the hive: strictly inward along void when possible, then hive,
+ * then an assaultable tile on the corridor that blocks progress.
+ */
+const shortestQueenHopTowardHiveInner = (defender: PlayerState, from: Hex): Hex | null => {
+  const goals = hiveCentersFor(defender);
+  if (goals.length === 0) return null;
 
-    for (const nbr of neighbors(cur)) {
-      const nk = hexKey(nbr);
-      if (dist.has(nk)) continue;
-      if (cubeDistance(nbr, goal) > maxVoidReach) continue;
+  const fromTile = defender.tiles.find((t) => hexEquals(t.hex, from));
+  if (fromTile?.state === 'hive') return null;
 
-      dist.set(nk, nextDc);
-      q.push(nbr);
+  const voidDist = queenVoidDistancesToInnerGates(defender);
+  const fromD = voidDist.get(hexKey(from)) ?? Infinity;
+
+  if (queenHiveStrikeAllowed(defender)) {
+    for (const goal of goals) {
+      if (neighbors(from).some((n) => hexEquals(n, goal))) return goal;
     }
   }
 
-  if (!dist.has(hexKey(from))) return null;
-
   let best: Hex | null = null;
-  let bestD = Infinity;
+  let bestScore = Infinity;
+
   for (const nbr of neighbors(from)) {
-    const nk = hexKey(nbr);
-    const d = dist.get(nk);
-    if (d === undefined) continue;
-    if (best === null || d < bestD || (d === bestD && nk.localeCompare(hexKey(best)) < 0)) {
-      bestD = d;
-      best = nbr;
+    if (!queenCanStepOnto(defender, nbr, goals)) continue;
+    const pathD = voidDist.get(hexKey(nbr));
+    if (pathD === undefined) continue;
+    if (pathD >= fromD) continue;
+    ({ best, bestScore } = queenPickBetterHop(voidDist, goals, best, bestScore, nbr));
+  }
+  if (best !== null) return best;
+
+  if (fromTile?.state === 'storage' || isVoidHex(defender, from)) {
+    const fromRing = queenRingDist(from, goals);
+    let storageHop: Hex | null = null;
+    let storageRing = Infinity;
+    for (const nbr of neighbors(from)) {
+      if (!queenCanStepOnto(defender, nbr, goals)) continue;
+      const tile = defender.tiles.find((t) => hexEquals(t.hex, nbr));
+      if (tile?.state !== 'storage') continue;
+      const ring = queenRingDist(nbr, goals);
+      if (ring >= fromRing) continue;
+      if (storageHop === null || ring < storageRing) {
+        storageHop = nbr;
+        storageRing = ring;
+      }
     }
+    if (storageHop !== null) return storageHop;
+  }
+
+  const onCorridor = (hex: Hex): boolean =>
+    voidDist.has(hexKey(hex)) || neighbors(hex).some((n) => voidDist.has(hexKey(n)));
+
+  for (const nbr of neighbors(from)) {
+    if (!queenCanStepOnto(defender, nbr, goals)) continue;
+    const tile = defender.tiles.find((t) => hexEquals(t.hex, nbr));
+    if (!tile || !isQueenAssaultableTile(tile) || tile.state === 'hive') continue;
+    if (remainingHpForTile(tile) <= 0) continue;
+    if (!onCorridor(nbr)) continue;
+    ({ best, bestScore } = queenPickBetterHop(voidDist, goals, best, bestScore, nbr));
   }
 
   return best;
 };
 
-const HIVE_CENTER = hex(0, 0);
+const shortestQueenHopTowardHive = (defender: PlayerState, from: Hex): Hex | null =>
+  shortestQueenHopTowardHiveInner(defender, queenPassThroughStorage(defender, from));
 
-const defenderHasHiveTile = (player: PlayerState): boolean =>
-  player.tiles.some((t) => t.state === 'hive' && hexEquals(t.hex, HIVE_CENTER));
+/** When pathing leaves the queen on storage, step to any non-storage hex toward the hive. */
+const queenEscapeFromStorage = (defender: PlayerState, on: Hex): Hex | null => {
+  const goals = hiveCentersFor(defender);
+  if (goals.length === 0) return null;
+  const voidDist = queenVoidDistancesToInnerGates(defender);
+  let best: Hex | null = null;
+  let bestScore = Infinity;
+  for (const nbr of neighbors(on)) {
+    const tile = defender.tiles.find((t) => hexEquals(t.hex, nbr));
+    if (tile?.state === 'storage') continue;
+    if (!queenCanStepOnto(defender, nbr, goals)) continue;
+    ({ best, bestScore } = queenPickBetterHop(voidDist, goals, best, bestScore, nbr));
+  }
+  return best;
+};
 
-const defenderHasAllStorage = (player: PlayerState): boolean =>
-  player.tiles.filter((t) => t.state === 'storage').length >= STORAGE_SLOT_COUNT;
+/** True when every neighbor of `center` is a capped letter tile. */
+const ringFullyCappedAt = (player: PlayerState, center: Hex): boolean => {
+  for (const h of neighbors(center)) {
+    const t = player.tiles.find((x) => hexEquals(x.hex, h));
+    if (!t || t.state !== 'capped' || !t.letter) return false;
+  }
+  return true;
+};
 
-/** Queen reached the hive center, destroyed the hive tile, or smashed a storage slot. */
-const queenBreachedDefender = (defender: PlayerState, queenHex: Hex): boolean =>
-  hexEquals(queenHex, HIVE_CENTER) ||
-  !defenderHasHiveTile(defender) ||
-  !defenderHasAllStorage(defender);
+/** Six-letter dictionary word spelled by capped letters in a ring around `center`, if any. */
+const ringWordAtCenter = (player: PlayerState, center: Hex): string | null => {
+  if (!ringFullyCappedAt(player, center)) return null;
+  const letters: Letter[] = [];
+  for (const h of neighbors(center)) {
+    const t = player.tiles.find((x) => hexEquals(x.hex, h))!;
+    letters.push(t.letter!);
+  }
+  const variants = [
+    letters.join(''),
+    ...Array.from({ length: 5 }, (_, i) =>
+      [...letters.slice(i + 1), ...letters.slice(0, i + 1)].join(''),
+    ),
+  ];
+  for (const w of variants) {
+    if (w.length === 6 && isWord(w)) return w;
+  }
+  return null;
+};
 
-type DestroyTileResult = { readonly player: PlayerState; readonly hiveDestroyed: boolean };
+/** True when `path` is a six-letter ring word around `center` (center may be unowned). */
+export const isRingFoundingPath = (
+  path: readonly Hex[],
+  letters: readonly Letter[],
+  player: PlayerState,
+): boolean => {
+  if (letters.length !== 6) return false;
+  const center = ringCenterForPath(path);
+  if (!center) return false;
+  if (!isWord(letters.join(''))) return false;
+  if (player.tiles.some((t) => t.state === 'hive' && hexEquals(t.hex, center))) return false;
+  return true;
+};
+
+/** Found a satellite hive: core + six empty storage slots on the ring. */
+const spawnSatelliteHive = (player: PlayerState, center: Hex): PlayerState => {
+  const ringKeys = new Set(neighbors(center).map(hexKey));
+  const hasCenter = player.tiles.some((t) => hexEquals(t.hex, center));
+  let tiles = player.tiles.map((t) => {
+    if (hexEquals(t.hex, center)) {
+      return { ...t, state: 'hive' as const, letter: null, reuseCount: 0, damage: 0 };
+    }
+    if (ringKeys.has(hexKey(t.hex))) {
+      return { ...t, state: 'storage' as const, letter: null, reuseCount: 0, damage: 0 };
+    }
+    return t;
+  });
+  if (!hasCenter) {
+    tiles = [
+      ...tiles,
+      { hex: center, state: 'hive' as const, letter: null, reuseCount: 0, damage: 0 },
+    ];
+  }
+  return { ...player, tiles };
+};
+
+const applySatelliteHiveSpawns = (
+  player: PlayerState,
+  cappedPaths?: readonly (readonly Hex[])[],
+  wordsLetters?: readonly Letter[][],
+): PlayerState => {
+  const seen = new Set<string>();
+  let next = player;
+
+  const trySpawn = (center: Hex): void => {
+    const k = hexKey(center);
+    if (seen.has(k)) return;
+    if (next.tiles.some((t) => t.state === 'hive' && hexEquals(t.hex, center))) return;
+    if (!ringFullyCappedAt(next, center)) return;
+    seen.add(k);
+    next = spawnSatelliteHive(next, center);
+  };
+
+  if (cappedPaths && wordsLetters) {
+    for (let i = 0; i < cappedPaths.length; i++) {
+      const path = cappedPaths[i];
+      const letters = wordsLetters[i];
+      if (!path || !letters || letters.length !== 6) continue;
+      if (!isRingFoundingPath(path, letters, next)) continue;
+      const center = ringCenterForPath(path);
+      if (center) trySpawn(center);
+    }
+  }
+
+  const tileByKey = new Map(next.tiles.map((t) => [hexKey(t.hex), t]));
+  for (const t of next.tiles) {
+    if (t.state === 'hive' || t.state === 'storage') continue;
+    if (ringWordAtCenter(next, t.hex)) trySpawn(t.hex);
+  }
+  for (const t of next.tiles) {
+    if (t.state !== 'capped') continue;
+    for (const c of neighbors(t.hex)) {
+      const ck = hexKey(c);
+      if (seen.has(ck)) continue;
+      const centerTile = tileByKey.get(ck);
+      if (centerTile?.state === 'hive' || centerTile?.state === 'storage') continue;
+      if (ringWordAtCenter(next, c)) trySpawn(c);
+    }
+  }
+  for (const t of next.tiles) {
+    if (t.state !== 'capped') continue;
+    for (const c of neighbors(t.hex)) {
+      if (tileByKey.has(hexKey(c))) continue;
+      if (seen.has(hexKey(c))) continue;
+      if (ringWordAtCenter(next, c)) trySpawn(c);
+    }
+  }
+
+  return next;
+};
+
+/** Remove a hive core and its six adjacent storage slots; stored letters are lost. */
+const destroyHiveCluster = (player: PlayerState, hiveHex: Hex): PlayerState => {
+  const storageKeys = new Set(neighbors(hiveHex).map(hexKey));
+  return {
+    ...player,
+    tiles: player.tiles.filter(
+      (t) =>
+        !hexEquals(t.hex, hiveHex) &&
+        !(t.state === 'storage' && storageKeys.has(hexKey(t.hex))),
+    ),
+  };
+};
+
+type DestroyTileResult = { readonly player: PlayerState; readonly hiveClusterDestroyed: boolean };
+
+const isActiveBombTile = (tile: TileSnapshot | undefined): boolean =>
+  !!tile?.specialKind && tile.specialKind === 'bomb' && !tile.letter;
+
+const bombHexKeysNear = (defender: PlayerState, h: Hex): readonly string[] => {
+  const keys: string[] = [];
+  const here = defender.tiles.find((t) => hexEquals(t.hex, h));
+  if (isActiveBombTile(here)) keys.push(hexKey(h));
+  for (const n of neighbors(h)) {
+    const t = defender.tiles.find((x) => hexEquals(x.hex, n));
+    if (isActiveBombTile(t)) keys.push(hexKey(n));
+  }
+  return keys;
+};
+
+const resolveBombTile = (tile: TileSnapshot): TileSnapshot => {
+  const { specialKind: _sk, bombOwnerId: _bo, resolvedLetter, ...rest } = tile;
+  return {
+    ...rest,
+    letter: resolvedLetter ?? tile.letter,
+  };
+};
+
+const triggerBombsNear = (
+  defender: PlayerState,
+  h: Hex,
+): { readonly player: PlayerState; readonly triggered: boolean } => {
+  const keys = bombHexKeysNear(defender, h);
+  if (keys.length === 0) return { player: defender, triggered: false };
+  const keySet = new Set(keys);
+  return {
+    triggered: true,
+    player: {
+      ...defender,
+      tiles: defender.tiles.map((t) =>
+        keySet.has(hexKey(t.hex)) && isActiveBombTile(t) ? resolveBombTile(t) : t,
+      ),
+    },
+  };
+};
+
+const queenStrikeIntervalFor = (buffs: number): number =>
+  Math.max(0.15, QUEEN_ACTION_INTERVAL_SECONDS - buffs * CROWN_QUEEN_INTERVAL_REDUCTION);
+
+const queenStrikeDamageFor = (tile: TileSnapshot, buffs: number): number => {
+  if (tile.state === 'hive') return 1;
+  return QUEEN_DAMAGE_PER_STRIKE + buffs * CROWN_QUEEN_DAMAGE_BONUS;
+};
+
+const applyCastleReuseArmor = (
+  tiles: readonly TileSnapshot[],
+  center: Hex,
+): TileSnapshot[] => {
+  const boosted = new Set([hexKey(center), ...neighbors(center).map(hexKey)]);
+  return tiles.map((t) =>
+    boosted.has(hexKey(t.hex))
+      ? { ...t, reuseCount: (t.reuseCount ?? 0) + CASTLE_FORTIFICATION_BONUS }
+      : t,
+  );
+};
+
+const hammerAngleFromCenter = (center: Hex, h: Hex): number => {
+  const c = axialToPixel(center, 30);
+  const p = axialToPixel(h, 30);
+  return Math.atan2(p.y - c.y, p.x - c.x);
+};
+
+const sortHammerCircular = (center: Hex, hexes: readonly Hex[]): Hex[] =>
+  [...hexes].sort((a, b) => {
+    const da = cubeDistance(a, center);
+    const db = cubeDistance(b, center);
+    if (da !== db) return da - db;
+    return hammerAngleFromCenter(center, a) - hammerAngleFromCenter(center, b);
+  });
+
+const hammerFrontierCandidates = (
+  player: PlayerState,
+  visited: ReadonlySet<string>,
+): Hex[] => {
+  const center = player.hammerExpansionCenter;
+  if (!center) return [];
+  const owned = new Set(player.tiles.map((t) => hexKey(t.hex)));
+  const candidates = new Map<string, Hex>();
+  for (const t of player.tiles) {
+    if (t.state === 'hive' || t.state === 'inactive') continue;
+    for (const n of neighbors(t.hex)) {
+      const nk = hexKey(n);
+      if (owned.has(nk) || visited.has(nk)) continue;
+      if (!neighbors(n).some((nn) => owned.has(hexKey(nn)))) continue;
+      if (!isCarpenterEligible(player, n)) continue;
+      candidates.set(nk, n);
+    }
+  }
+  return sortHammerCircular(center, [...candidates.values()]);
+};
+
+const pickHammerExpansionSeed = (
+  path: readonly Hex[],
+  player: PlayerState,
+  center: Hex,
+): Hex | null => {
+  const onPath = new Set(path.map(hexKey));
+  const owned = new Set(player.tiles.map((t) => hexKey(t.hex)));
+  const visited = new Set(player.hammerExpansionVisited ?? []);
+  const candidates = new Map<string, Hex>();
+  for (const h of path) {
+    for (const n of neighbors(h)) {
+      const nk = hexKey(n);
+      if (onPath.has(nk) || owned.has(nk) || visited.has(nk)) continue;
+      if (!neighbors(n).some((nn) => owned.has(hexKey(nn)))) continue;
+      candidates.set(nk, n);
+    }
+  }
+  const sorted = sortHammerCircular(center, [...candidates.values()]);
+  return sorted[0] ?? null;
+};
+
+const pickNextHammerExpansionHex = (player: PlayerState): Hex | null => {
+  const visited = new Set(player.hammerExpansionVisited ?? []);
+  const candidates = hammerFrontierCandidates(player, visited);
+  return candidates[0] ?? null;
+};
+
+const markHammerHexVisited = (player: PlayerState, h: Hex): PlayerState => {
+  const k = hexKey(h);
+  const prev = player.hammerExpansionVisited ?? [];
+  if (prev.includes(k)) return player;
+  return { ...player, hammerExpansionVisited: [...prev, k] };
+};
+
+const clearHammerExpansionState = (player: PlayerState): PlayerState => {
+  const {
+    hammerExpansionUntil: _u,
+    hammerExpansionCenter: _c,
+    hammerExpansionVisited: _v,
+    ...rest
+  } = player;
+  return rest;
+};
+
+const clearExpiredHammerExpansion = (world: World): World => {
+  let next = world;
+  for (const playerId of world.activePlayerIds) {
+    const player = getPlayer(next, playerId);
+    if (
+      player.hammerExpansionUntil === undefined ||
+      world.t < player.hammerExpansionUntil
+    ) {
+      continue;
+    }
+    const { hammerExpansionUntil: _u, ...rest } = player;
+    next = setPlayerById(next, playerId, clearHammerExpansionState(rest));
+  }
+  return next;
+};
+
+const spawnHammerCarpenter = (
+  playerId: string,
+  hivePanel: HiveAssaultPanel,
+  fromHex: Hex,
+  targetHex: Hex,
+  t: number,
+  firstHop: boolean,
+): Bee => ({
+  id: newId(),
+  kind: 'carpenter',
+  ownerId: playerId,
+  capacity: 1,
+  state: {
+    kind: 'carpenter-flying',
+    queue: [],
+    target: targetHex,
+    hammerExpansion: true,
+    flight: flight(
+      hivePanel,
+      fromHex,
+      hivePanel,
+      targetHex,
+      t,
+      firstHop ? FLIGHT_TIMES.hiveToTile : FLIGHT_TIMES.tileToTile,
+    ),
+  },
+});
+
+type SpecialCapEffectsResult = {
+  readonly player: PlayerState;
+  readonly hammerStart: Hex | null;
+};
+
+const applySpecialCapEffects = (
+  player: PlayerState,
+  path: readonly Hex[],
+  resolvedByHex: ReadonlyMap<string, Letter>,
+  ownerId: string,
+  t: number,
+  tilesBeforeCap: readonly TileSnapshot[],
+): SpecialCapEffectsResult => {
+  let next = player;
+  let hammerStart: Hex | null = null;
+  const tileBeforeCap = (h: Hex): TileSnapshot | undefined =>
+    tilesBeforeCap.find((x) => hexEquals(x.hex, h));
+  for (const h of path) {
+    const before = tileBeforeCap(h);
+    if (!before || !specialEffectEligible(before)) continue;
+    const kind = before.specialKind;
+    if (!kind || kind === 'bomb') continue;
+    const resolved = resolvedByHex.get(hexKey(h))!;
+    if (kind === 'castle') {
+      next = { ...next, tiles: applyCastleReuseArmor(next.tiles, h) };
+    }
+    next = {
+      ...next,
+      tiles: next.tiles.map((x) =>
+        hexEquals(x.hex, h)
+          ? stripSpecialTileFields(x, { letter: resolved, specialSpent: true as const })
+          : x,
+      ),
+    };
+  }
+  const hammerHex = path.find((h) => {
+    const before = tileBeforeCap(h);
+    return before?.specialKind === 'hammer' && specialEffectEligible(before);
+  });
+  if (hammerHex) {
+    const center = ringCenterForPath(path) ?? hammerHex;
+    const seed = pickHammerExpansionSeed(path, next, center);
+    if (seed) {
+      next = {
+        ...next,
+        hammerExpansionUntil: t + HAMMER_EXPANSION_SECONDS,
+        hammerExpansionCenter: center,
+        hammerExpansionVisited: [],
+      };
+      hammerStart = seed;
+    }
+  }
+  const crownCount = path.filter((h) => {
+    const before = tileBeforeCap(h);
+    return before?.specialKind === 'crown' && specialEffectEligible(before);
+  }).length;
+  if (crownCount > 0) {
+    next = {
+      ...next,
+      queenStrikeBuffs: (next.queenStrikeBuffs ?? 0) + crownCount,
+    };
+  }
+  return { player: next, hammerStart };
+};
+
+const stripSpecialTileFields = (
+  tile: TileSnapshot,
+  patch: Partial<TileSnapshot>,
+): TileSnapshot => {
+  const { specialKind: _sk, bombOwnerId: _bo, resolvedLetter: _rl, ...rest } = tile;
+  return { ...rest, ...patch };
+};
+
+const filterTilesForViewer = (
+  viewerId: string,
+  tiles: readonly TileSnapshot[],
+): TileSnapshot[] =>
+  tiles.map((t) => {
+    if (t.specialKind === 'bomb' && t.bombOwnerId && t.bombOwnerId !== viewerId) {
+      const { specialKind: _sk, bombOwnerId: _bo, resolvedLetter: _rl, ...rest } = t;
+      return { ...rest, letter: null };
+    }
+    return t;
+  });
+
+const filterPlayerForViewer = (
+  world: World,
+  viewerId: string,
+  player: PlayerState,
+): PlayerState => ({
+  ...player,
+  tiles: filterTilesForViewer(viewerId, player.tiles),
+});
 
 const destroyTile = (player: PlayerState, h: Hex, t: number): DestroyTileResult => {
   const tile = player.tiles.find((x) => hexEquals(x.hex, h));
-  if (!tile) return { player, hiveDestroyed: false };
-  const hiveDestroyed = tile.state === 'hive';
+  if (!tile) return { player, hiveClusterDestroyed: false };
+  if (tile.state === 'hive') {
+    return { player: destroyHiveCluster(player, h), hiveClusterDestroyed: true };
+  }
   const nextTiles = player.tiles.filter((x) => !hexEquals(x.hex, h));
   const freed =
-    !hiveDestroyed && tile.letter !== null
+    tile.letter !== null
       ? [
           ...(player.freedLetters ?? []),
           {
@@ -1844,9 +2839,12 @@ const destroyTile = (player: PlayerState, h: Hex, t: number): DestroyTileResult 
       : (player.freedLetters ?? []);
   return {
     player: { ...player, tiles: nextTiles, freedLetters: freed },
-    hiveDestroyed,
+    hiveClusterDestroyed: false,
   };
 };
+
+const queenStrikeDamage = (tile: TileSnapshot, buffs = 0): number =>
+  queenStrikeDamageFor(tile, buffs);
 
 const eliminatePlayer = (
   world: World,
@@ -1932,51 +2930,140 @@ const tickQueens = (world: World): World => {
         bees.push(bee);
         continue;
       }
-      const ch = bee.state.currentHex;
-      if (queenBreachedDefender(defender, ch)) {
-        return eliminatePlayer(next, attackerId, attacker, defenderId, defender, bees);
+      const queenBuffs = attacker.queenStrikeBuffs ?? 0;
+      const queenInterval = queenStrikeIntervalFor(queenBuffs);
+      let ch = queenPassThroughStorage(defender, bee.state.currentHex);
+      const bombHit = triggerBombsNear(defender, ch);
+      if (bombHit.triggered) {
+        defender = bombHit.player;
+        next = logEvent(next, {
+          t: next.t,
+          ownerId: attacker.id,
+          text: `queen bombed out!`,
+        });
+        next = setPlayerById(next, defenderId, defender);
+        continue;
       }
-      const tileHere = defender.tiles.find((t) => hexEquals(t.hex, ch));
-      if (tileHere) {
-        const nextDamage = (tileHere.damage ?? 0) + QUEEN_DAMAGE_PER_STRIKE;
-        if (nextDamage >= hexHpForTile(tileHere)) {
-          const destroyed = destroyTile(defender, ch, next.t);
+      if (defender.tiles.find((t) => hexEquals(t.hex, ch))?.state === 'storage') {
+        const off =
+          queenEscapeFromStorage(defender, ch) ??
+          queenNearestAssaultableTowardHive(defender, ch);
+        if (off && !hexEquals(off, ch)) ch = off;
+      }
+      let tileHere = defender.tiles.find((t) => hexEquals(t.hex, ch));
+
+      const maybeEliminateDefender = (): World | null => {
+        if (hiveCountFor(defender) > 0) return null;
+        return eliminatePlayer(next, attackerId, attacker, defenderId, defender, bees);
+      };
+
+      const assaultHex = (h: Hex, tile: TileSnapshot): void => {
+        if (tile.state === 'storage') return;
+        const nextDamage = (tile.damage ?? 0) + queenStrikeDamage(tile, queenBuffs);
+        if (nextDamage >= hexHpForTile(tile)) {
+          const destroyed = destroyTile(defender, h, next.t);
           defender = destroyed.player;
-          if (destroyed.hiveDestroyed || queenBreachedDefender(defender, ch)) {
-            return eliminatePlayer(next, attackerId, attacker, defenderId, defender, bees);
-          }
+          const logText = destroyed.hiveClusterDestroyed
+            ? 'queen destroyed a hive!'
+            : `queen smashed ${tile.letter ?? 'tile'}`;
           next = logEvent(next, {
             t: next.t,
             ownerId: attacker.id,
-            text: `queen smashed ${tileHere.letter ?? 'tile'}`,
+            text: logText,
           });
         } else {
           defender = {
             ...defender,
             tiles: defender.tiles.map((t) =>
-              hexEquals(t.hex, ch) ? { ...t, damage: nextDamage } : t,
+              hexEquals(t.hex, h) ? { ...t, damage: nextDamage } : t,
             ),
           };
         }
+      };
+
+      const step = shortestQueenHopTowardHiveInner(defender, ch);
+
+      if (tileHere && isQueenAssaultableTile(tileHere) && remainingHpForTile(tileHere) > 0) {
+        if (tileHere.state === 'hive') {
+          assaultHex(ch, tileHere);
+          const eliminated = maybeEliminateDefender();
+          if (eliminated) return eliminated;
+          bees.push({
+            ...bee,
+            state: { ...bee.state, currentHex: ch, nextActionAt: next.t + queenInterval },
+          });
+          next = setPlayerById(next, defenderId, defender);
+          continue;
+        }
+
+        const voidDist = queenVoidDistancesToInnerGates(defender);
+        const hereD = voidDist.get(hexKey(ch)) ?? Infinity;
+        const stepD = step ? voidDist.get(hexKey(step)) ?? Infinity : Infinity;
+        const stepTile = step ? defender.tiles.find((t) => hexEquals(t.hex, step)) : undefined;
+        const canLeaveAlongVoid =
+          step &&
+          !hexEquals(step, ch) &&
+          (stepTile?.state === 'storage' || (isVoidHex(defender, step) && stepD < hereD));
+        if (canLeaveAlongVoid) {
+          const stepTile = defender.tiles.find((t) => hexEquals(t.hex, step));
+          if (stepTile?.state === 'storage') {
+            const slid = queenPassThroughStorage(defender, step);
+            bees.push({
+              ...bee,
+              state: {
+                ...bee.state,
+                currentHex: slid,
+                nextActionAt: next.t + queenInterval,
+              },
+            });
+            next = setPlayerById(next, defenderId, defender);
+            continue;
+          }
+          bees.push({
+            ...bee,
+            state: {
+              ...bee.state,
+              currentHex: step,
+              nextActionAt: next.t + queenInterval,
+            },
+          });
+          next = setPlayerById(next, defenderId, defender);
+          continue;
+        }
+        assaultHex(ch, tileHere);
+        const eliminated = maybeEliminateDefender();
+        if (eliminated) return eliminated;
         bees.push({
           ...bee,
-          state: { ...bee.state, nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS },
+          state: { ...bee.state, currentHex: ch, nextActionAt: next.t + queenInterval },
         });
         next = setPlayerById(next, defenderId, defender);
         continue;
       }
 
-      const step = shortestQueenHopTowardHive(defender, ch);
       if (!step) {
+        if (tileHere?.state === 'storage') {
+          const escape = queenEscapeFromStorage(defender, ch);
+          if (escape && !hexEquals(escape, ch)) {
+            bees.push({
+              ...bee,
+              state: {
+                ...bee.state,
+                currentHex: escape,
+                nextActionAt: next.t + queenInterval,
+              },
+            });
+            next = setPlayerById(next, defenderId, defender);
+            continue;
+          }
+        }
         bees.push({
           ...bee,
-          state: { ...bee.state, nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS },
+          state: { ...bee.state, currentHex: ch, nextActionAt: next.t + queenInterval },
         });
         continue;
       }
-      if (queenBreachedDefender(defender, step)) {
-        return eliminatePlayer(next, attackerId, attacker, defenderId, defender, bees);
-      }
+
       const targetTile = defender.tiles.find((t) => hexEquals(t.hex, step));
       if (!targetTile) {
         bees.push({
@@ -1984,43 +3071,50 @@ const tickQueens = (world: World): World => {
           state: {
             ...bee.state,
             currentHex: step,
-            nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS,
+            nextActionAt: next.t + queenInterval,
           },
         });
         continue;
       }
-      const nextDamage = (targetTile.damage ?? 0) + QUEEN_DAMAGE_PER_STRIKE;
-      if (nextDamage >= hexHpForTile(targetTile)) {
-        const destroyed = destroyTile(defender, step, next.t);
-        defender = destroyed.player;
-        if (destroyed.hiveDestroyed || queenBreachedDefender(defender, step)) {
-          return eliminatePlayer(next, attackerId, attacker, defenderId, defender, bees);
-        }
-        next = logEvent(next, {
-          t: next.t,
-          ownerId: attacker.id,
-          text: `queen smashed ${targetTile.letter ?? 'tile'}`,
-        });
+
+      if (targetTile.state === 'storage') {
+        const slid = queenPassThroughStorage(defender, step);
         bees.push({
           ...bee,
           state: {
             ...bee.state,
-            currentHex: step,
-            nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS,
+            currentHex: slid,
+            nextActionAt: next.t + queenInterval,
           },
         });
-      } else {
-        defender = {
-          ...defender,
-          tiles: defender.tiles.map((t) =>
-            hexEquals(t.hex, step) ? { ...t, damage: nextDamage } : t,
-          ),
-        };
-        bees.push({
-          ...bee,
-          state: { ...bee.state, nextActionAt: next.t + QUEEN_ACTION_INTERVAL_SECONDS },
-        });
+        next = setPlayerById(next, defenderId, defender);
+        continue;
       }
+
+      const stepBomb = triggerBombsNear(defender, step);
+      if (stepBomb.triggered) {
+        defender = stepBomb.player;
+        next = logEvent(next, {
+          t: next.t,
+          ownerId: attacker.id,
+          text: `queen bombed out!`,
+        });
+        next = setPlayerById(next, defenderId, defender);
+        continue;
+      }
+      const assaultTarget = defender.tiles.find((t) => hexEquals(t.hex, step)) ?? targetTile;
+
+      assaultHex(step, assaultTarget);
+      const eliminated = maybeEliminateDefender();
+      if (eliminated) return eliminated;
+      bees.push({
+        ...bee,
+        state: {
+          ...bee.state,
+          currentHex: step,
+          nextActionAt: next.t + queenInterval,
+        },
+      });
       next = setPlayerById(next, defenderId, defender);
     }
     if (dirty) {
@@ -2075,7 +3169,7 @@ export const dispatchWorker = (
   const freedTarget = (player.freedLetters ?? []).find((f) => hexEquals(f.hex, target));
   const flowerTarget = freedTarget ? null : petalAt(world.patches, target);
   if (!flowerTarget && !freedTarget) return { ok: false, world, reason: 'no letter here' };
-  const emptyStorage = player.tiles.some((t) => t.state === 'storage' && !t.letter);
+  const emptyStorage = player.tiles.some(storageSlotEmpty);
   if (!emptyStorage) {
     return { ok: false, world, reason: 'storage is full' };
   }
@@ -2158,9 +3252,15 @@ export const dispatchQueen = (
   } else {
     landing = pickQueenLandingHex(enemy);
   }
+  if (hiveCountFor(enemy) === 0) return { ok: false, world, reason: 'enemy hive unavailable' };
   if (!landing) return { ok: false, world, reason: 'enemy hive unavailable' };
   const ownerPanel = hivePanelForPlayer(world, playerId);
   const enemyPanel = hivePanelForPlayer(world, defenderId);
+  const breachLanding = landing;
+  const plan = queenIngressFlightPlan(enemy, breachLanding);
+  const flightTo = plan.twoPhase ? plan.ingressHex : plan.assaultGoal;
+  const flightSeconds =
+    FLIGHT_TIMES.queenToHive + (plan.twoPhase ? FLIGHT_TIMES.queenVoidToHive : 0);
   const bee: Bee = {
     id: newId(),
     kind: 'queen',
@@ -2170,15 +3270,22 @@ export const dispatchQueen = (
       kind: 'queen-flying',
       assaultPanel: enemyPanel,
       defenderPlayerId: defenderId,
-      landingHex: landing,
-      approachVoidHexKeys: queenApproachVoidHexKeys(enemy, landing),
+      landingHex: plan.assaultGoal,
+      breachHex: breachLanding,
+      approachVoidHexKeys: queenApproachVoidHexKeys(enemy, breachLanding),
+      ...(plan.twoPhase
+        ? {
+            ...(plan.approachVoid ? { approachVoidHex: plan.approachVoid } : {}),
+            flightPhase: 'ingress' as const,
+          }
+        : {}),
       ...(attackSide !== undefined ? { attackSide } : {}),
-      expiresAt: world.t + FLIGHT_TIMES.queenToHive + QUEEN_ASSAULT_DURATION_SECONDS,
+      expiresAt: world.t + flightSeconds + QUEEN_ASSAULT_DURATION_SECONDS,
       flight: flight(
         ownerPanel,
         hex(0, 0),
         enemyPanel,
-        landing,
+        flightTo,
         world.t,
         FLIGHT_TIMES.queenToHive,
       ),
@@ -2204,7 +3311,7 @@ export const placeLetter = (
   const player = getPlayer(world, playerId);
   const source = player.tiles.find((t) => hexEquals(t.hex, fromHex));
   const dest = player.tiles.find((t) => hexEquals(t.hex, toHex));
-  if (!source?.letter) {
+  if (!source?.letter && !source?.specialKind) {
     return { ok: false, world, reason: 'no letter at source' };
   }
   if (source.state === 'capped') {
@@ -2212,30 +3319,44 @@ export const placeLetter = (
   }
   const fromStorage = source.state === 'storage';
   const fromGrid =
-    (source.state === 'active' && source.letter) ||
-    (source.state === 'letter' && source.letter);
+    (source.state === 'active' && (source.letter || source.specialKind)) ||
+    (source.state === 'letter' && (source.letter || source.specialKind));
   if (!fromStorage && !fromGrid) {
     return { ok: false, world, reason: 'invalid source for letter move' };
   }
-  if (!dest || dest.letter) {
+  if (!dest || dest.letter || dest.specialKind) {
     return { ok: false, world, reason: 'destination already holds a letter' };
   }
   if (dest.state !== 'active' && dest.state !== 'storage') {
     return { ok: false, world, reason: 'destination is not a letter slot' };
   }
   const letter = source.letter;
+  const specialKind = source.specialKind;
+  const bombOwnerId = source.bombOwnerId;
+  const clearSource = (): TileSnapshot => {
+    if (fromStorage) {
+      const { specialKind: _sk, bombOwnerId: _bo, ...rest } = source;
+      return { ...rest, letter: null };
+    }
+    return stripSpecialTileFields(source, {
+      state: 'active',
+      letter: null,
+    });
+  };
+  const fillDest = (): TileSnapshot => {
+    const payload = {
+      ...(letter ? { letter } : { letter: null }),
+      ...(specialKind ? { specialKind, ...(bombOwnerId ? { bombOwnerId } : {}) } : {}),
+    };
+    return dest.state === 'storage'
+      ? { ...dest, ...payload }
+      : { ...dest, state: 'active' as const, ...payload };
+  };
   const updated: PlayerState = {
     ...player,
     tiles: player.tiles.map((t) => {
-      if (hexEquals(t.hex, fromHex)) {
-        if (fromStorage) return { ...t, letter: null };
-        return { ...t, state: 'active' as const, letter: null };
-      }
-      if (hexEquals(t.hex, toHex)) {
-        return dest.state === 'storage'
-          ? { ...t, letter }
-          : { ...t, state: 'active' as const, letter };
-      }
+      if (hexEquals(t.hex, fromHex)) return clearSource();
+      if (hexEquals(t.hex, toHex)) return fillDest();
       return t;
     }),
   };
@@ -2262,29 +3383,28 @@ export const trySubmitWord = (
   }
   const seenSignatures = new Set(player.usedWordSignatures);
   const nextSignatures: string[] = [];
+  let submitLetters: Letter[] = [];
   for (const path of paths) {
     if (path.length < 2) return { ok: false, world, reason: 'word too short' };
     if (!isValidPath(path)) return { ok: false, world, reason: 'path is not contiguous' };
-    const letters: Letter[] = [];
-    const placements: string[] = [];
+    const resolved = resolveWordFromPath(path, player.tiles);
+    if (!resolved) return { ok: false, world, reason: 'invalid word' };
     for (const h of path) {
       const tile = player.tiles.find((t) => hexEquals(t.hex, h));
-      if (!tile || !tileHasDraftableLetter(tile)) {
+      if (!tile || !tileHasDraftableContent(tile)) {
         return { ok: false, world, reason: 'path includes a non-letter tile' };
       }
-      letters.push(tile.letter);
-      placements.push(`${h.q},${h.r}:${tile.letter}`);
     }
-    const word = letters.join('');
-    // Signature is independent of drag direction: same word + same lettered
-    // hex assignments cannot be scored repeatedly.
-    const signature = `${word}|${placements.sort().join('|')}`;
+    submitLetters = path.map((h) => resolved.resolvedByHex.get(hexKey(h))!);
+    const signature = wordSignatureForPath(path, resolved.resolvedByHex);
     if (seenSignatures.has(signature)) {
       return { ok: false, world, reason: 'word already used on these tiles' };
     }
     seenSignatures.add(signature);
     nextSignatures.push(signature);
   }
+  const path = paths[0]!;
+  const ringFounding = isRingFoundingPath(path, submitLetters, player);
   const flightSeconds = FLIGHT_TIMES.cappingPerPath;
   const bee: Bee = {
     id: newId(),
@@ -2296,7 +3416,7 @@ export const trySubmitWord = (
       panel: hivePanelForPlayer(world, playerId),
       paths,
       startedAt: world.t,
-      arrivesAt: world.t + flightSeconds,
+      arrivesAt: world.t + (ringFounding ? 0 : flightSeconds),
     },
   };
   const updated: PlayerState = {
@@ -2305,7 +3425,11 @@ export const trySubmitWord = (
     bees: [...player.bees, bee],
     usedWordSignatures: [...player.usedWordSignatures, ...nextSignatures],
   };
-  return { ok: true, world: setPlayerById(world, playerId, updated) };
+  let nextWorld = setPlayerById(world, playerId, updated);
+  if (ringFounding) {
+    nextWorld = resolveArrivedBees({ ...nextWorld, t: world.t + 1 }, undefined);
+  }
+  return { ok: true, world: nextWorld };
 };
 
 const isCarpenterEligible = (player: PlayerState, h: Hex): boolean => {
@@ -2471,9 +3595,17 @@ export const worldToSnapshot = (
     tick,
     phase: world.phase,
     winner,
-    self: remapPlayerBeesForViewer(world, viewerId, getPlayer(world, viewerId)),
+    self: remapPlayerBeesForViewer(
+      world,
+      viewerId,
+      filterPlayerForViewer(world, viewerId, getPlayer(world, viewerId)),
+    ),
     opponents: opponents.map((o) =>
-      remapPlayerBeesForViewer(world, viewerId, o.player),
+      remapPlayerBeesForViewer(
+        world,
+        viewerId,
+        filterPlayerForViewer(world, viewerId, o.player),
+      ),
     ),
     opponentSlots: opponents.map((o) => o.slot),
     playerCount: world.playerCount,
@@ -2509,7 +3641,7 @@ export const tickSoloAi = (world: World, dt: number, rng: () => number): World =
 
   if (aiWorkerCooldown <= 0) {
     const ai = getPlayer(next, aiId);
-    const hasStorageRoom = ai.tiles.some((t) => t.state === 'storage' && !t.letter);
+    const hasStorageRoom = ai.tiles.some(storageSlotEmpty);
     if (hasStorageRoom && ai.honey >= BEE_STATS.worker.honeyCost) {
       const claimed = new Set<string>();
       for (const b of ai.bees) {

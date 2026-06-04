@@ -102,7 +102,7 @@ export const drawLetter = (rng: () => number): Letter => {
  * vowel patch still tilts toward A/E over O/U, and a rare patch only rarely
  * surfaces a Q or Z.
  */
-export type FlowerType = 'vowel' | 'common' | 'rare';
+export type FlowerType = 'vowel' | 'common' | 'rare' | 'special';
 
 const VOWEL_LETTERS: readonly Letter[] = ['A', 'E', 'I', 'O', 'U'];
 const COMMON_LETTERS: readonly Letter[] = ['R', 'S', 'T', 'L', 'N', 'D'];
@@ -110,7 +110,10 @@ const RARE_LETTERS: readonly Letter[] = [
   'B', 'C', 'F', 'G', 'H', 'J', 'K', 'M', 'P', 'Q', 'V', 'W', 'X', 'Y', 'Z',
 ];
 
-export const FLOWER_LETTER_POOLS: Readonly<Record<FlowerType, readonly Letter[]>> = {
+export const FLOWER_LETTER_POOLS: Readonly<Record<
+  Exclude<FlowerType, 'special'>,
+  readonly Letter[]
+>> = {
   vowel: VOWEL_LETTERS,
   common: COMMON_LETTERS,
   rare: RARE_LETTERS,
@@ -118,7 +121,7 @@ export const FLOWER_LETTER_POOLS: Readonly<Record<FlowerType, readonly Letter[]>
 
 /** Draw a letter from one flower-type pool, weighted by Scrabble counts. */
 export const drawFlowerLetter = (
-  type: FlowerType,
+  type: Exclude<FlowerType, 'special'>,
   rng: () => number,
 ): Letter => {
   const pool = FLOWER_LETTER_POOLS[type];

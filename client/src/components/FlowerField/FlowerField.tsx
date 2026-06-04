@@ -24,6 +24,7 @@ import {
   hexKey,
   letterValue,
   range,
+  specialTileIcon,
   type FlowerPatch,
   type FlowerType,
   type Hex,
@@ -65,6 +66,7 @@ const TYPE_LABEL: Record<FlowerType, string> = {
   vowel: 'VOWEL',
   common: 'COMMON',
   rare: 'UNCOMMON',
+  special: 'SPECIAL',
 };
 
 /** Returns 0..1 wither factor: 0 = fresh, 1 = about to drop. */
@@ -94,7 +96,7 @@ export const FlowerField = () => {
   // a contextual toast at the petal so the player sees *why* the gesture
   // bounced.
   const hasEmptyStorage = useMemo(
-    () => tiles.some((t) => t.state === 'storage' && !t.letter),
+    () => tiles.some((t) => t.state === 'storage' && !t.letter && !t.specialKind),
     [tiles],
   );
   // Refs let canStart see the *latest* values at click time without making
@@ -185,6 +187,7 @@ export const FlowerField = () => {
       <p className="grid-subtitle">
         hold a petal {holdSeconds}s to send a worker · {workerCost}🜨
       </p>
+      <div className="panel-nav-spacer" aria-hidden="true" />
       <div className="flower-field-canvas">
         <svg
           ref={svgRef}
@@ -199,15 +202,15 @@ export const FlowerField = () => {
           {patches.map((patch: FlowerPatch, patchIndex) => {
             const cp = axialToPixel(patch.center, HEX_SIZE);
             return (
-              <g key={patch.id} className="flower-patch" data-type={patch.type}>
+              <g key={patch.id} className="flower-patch" data-type={patch.specialFlower ? 'special' : patch.type}>
                 <g transform={`translate(${cp.x},${cp.y})`}>
                   <path
                     d={hexPath(HEX_SIZE * 0.55)}
                     className="flower-center"
-                    data-type={patch.type}
+                    data-type={patch.specialFlower ? 'special' : patch.type}
                   />
                   <text className="flower-center-label" x={0} y={0}>
-                    {TYPE_LABEL[patch.type]}
+                    {patch.specialFlower ? 'SPECIAL' : TYPE_LABEL[patch.type as Exclude<FlowerType, 'special'>]}
                   </text>
                 </g>
                 {patch.petals.map((petal, petalIndex) => {
@@ -227,7 +230,7 @@ export const FlowerField = () => {
                       key={k}
                       transform={`translate(${pp.x},${pp.y}) scale(${scale.toFixed(3)})`}
                       className="flower-petal"
-                      data-type={patch.type}
+                      data-type={patch.specialFlower ? 'special' : patch.type}
                       data-tutorial-target={
                         patchIndex === 0 && petalIndex === 0 ? 'flower-petal' : undefined
                       }
@@ -252,18 +255,20 @@ export const FlowerField = () => {
                       <path
                         d={hexPath(PETAL_HEX_SIZE)}
                         className="petal-tile"
-                        data-type={patch.type}
+                        data-type={patch.specialFlower ? 'special' : patch.type}
                       />
                       <text className="hex-letter petal-letter" x={0} y={0}>
-                        {petal.letter}
+                        {petal.specialKind ? specialTileIcon(petal.specialKind) : petal.letter}
                       </text>
-                      <text
-                        className="hex-letter-points petal-letter-points"
-                        x={0}
-                        y={PETAL_HEX_SIZE * 0.52}
-                      >
-                        {letterValue(petal.letter)}
-                      </text>
+                      {!petal.specialKind && petal.letter && (
+                        <text
+                          className="hex-letter-points petal-letter-points"
+                          x={0}
+                          y={PETAL_HEX_SIZE * 0.52}
+                        >
+                          {letterValue(petal.letter)}
+                        </text>
+                      )}
                       {claimedBySelf && !isHeld && (
                         <path
                           d={petalFlashD}

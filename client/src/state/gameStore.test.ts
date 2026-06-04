@@ -109,6 +109,24 @@ describe('gameStore', () => {
     expect(store.getState().letterDrag?.letter).toBe('A');
   });
 
+  test('startLetterDrag succeeds on storage holding a special tile', () => {
+    const store = useGameStore;
+    const storage = store.getState().world.self.tiles.find((t) => t.state === 'storage')!;
+    store.setState((s) => ({
+      world: patchClientSelf(s.world, {
+        ...s.world.self,
+        tiles: s.world.self.tiles.map((t) =>
+          t.hex.q === storage.hex.q && t.hex.r === storage.hex.r
+            ? { ...t, letter: null, specialKind: 'hammer' as const }
+            : t,
+        ),
+      }),
+    }));
+    store.getState().startLetterDrag(storage.hex);
+    expect(store.getState().letterDrag?.specialKind).toBe('hammer');
+    expect(store.getState().letterDrag?.letter).toBeUndefined();
+  });
+
   test('extendDraft adds adjacent ring-2 letter tiles and backtracks', () => {
     const store = useGameStore;
     store.setState((s) => ({

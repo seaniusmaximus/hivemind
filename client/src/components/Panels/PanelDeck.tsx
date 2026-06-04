@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { gsap } from 'gsap';
 import { useGameStore, type PanelIndex } from '../../state/gameStore.js';
-import { QueenSpawnButton } from './QueenSpawnButton.js';
 import { PanelNav } from './PanelNav.js';
+import { QueenSpawnButton } from './QueenSpawnButton.js';
 import { applyPanelDirection, type PanelNavContext } from './panelNavigation.js';
 
 interface Props {
@@ -29,14 +29,6 @@ interface SwipeState {
   lastY: number;
 }
 
-const panelLabel = (index: PanelIndex, rivalCount: number): string => {
-  if (index === 0) return 'YOUR HIVE';
-  if (index === 1) return 'FLOWERS';
-  if (index === 2) return rivalCount > 1 ? 'RIVAL (right)' : 'RIVAL HIVE';
-  if (index === 3) return 'RIVAL (above)';
-  return 'RIVAL (below)';
-};
-
 export const PanelDeck = ({ children }: Props) => {
   const panel = useGameStore((s) => s.panel);
   const setPanel = useGameStore((s) => s.setPanel);
@@ -45,13 +37,6 @@ export const PanelDeck = ({ children }: Props) => {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const swipeRef = useRef<SwipeState | null>(null);
   const trackAnimated = useRef(false);
-
-  const tabs = useMemo(() => {
-    const list: PanelIndex[] = [0, 1, 2];
-    if (rivalCount >= 2) list.push(3);
-    if (rivalCount >= 3) list.push(4);
-    return list;
-  }, [rivalCount]);
 
   useLayoutEffect(() => {
     const track = trackRef.current;
@@ -124,7 +109,7 @@ export const PanelDeck = ({ children }: Props) => {
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     const target = e.target as Element | null;
-    if (target?.closest('.hex-svg')) {
+    if (target?.closest('.hex-svg, .panel-nav-cluster')) {
       swipeRef.current = null;
       return;
     }
@@ -162,22 +147,6 @@ export const PanelDeck = ({ children }: Props) => {
 
   return (
     <>
-      <div className="panel-tabs" role="tablist">
-        {tabs.map((i) => (
-          <button
-            key={i}
-            role="tab"
-            type="button"
-            aria-selected={panel === i}
-            data-active={panel === i}
-            className="panel-tab"
-            onClick={() => navigate(i)}
-          >
-            {panelLabel(i, rivalCount)}
-          </button>
-        ))}
-      </div>
-      <PanelNav />
       <QueenSpawnButton />
       <div
         className="panel-deck panel-deck-cross"
@@ -186,6 +155,9 @@ export const PanelDeck = ({ children }: Props) => {
         onPointerUp={finishSwipe}
         onPointerCancel={cancelSwipe}
       >
+        <div className="panel-nav-dock">
+          <PanelNav />
+        </div>
         <div ref={trackRef} className="panel-deck-track">
           {children.map((child, i) => (
             <div className="panel" key={i} role="tabpanel" data-panel-index={i}>

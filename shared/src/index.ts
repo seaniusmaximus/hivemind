@@ -4,6 +4,7 @@ export * from './bees.js';
 export * from './messages.js';
 export * from './scoring.js';
 export * from './tileHp.js';
+export * from './specialTiles.js';
 export * from './dictionary.js';
 export * from './beeWords.js';
 export * from './engine/state.js';

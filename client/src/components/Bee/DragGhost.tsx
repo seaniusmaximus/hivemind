@@ -1,3 +1,4 @@
+import { specialTileIcon } from '@hivemind/shared';
 import { useEffect, useState } from 'react';
 import { useGameStore } from '../../state/gameStore.js';
 
@@ -33,7 +34,7 @@ export const DragGhost = () => {
       style={{ left: pos.x, top: pos.y }}
       aria-hidden
     >
-      {drag.letter}
+      {drag.specialKind ? specialTileIcon(drag.specialKind) : drag.letter}
     </div>
   );
 };

@@ -9,6 +9,7 @@ import {
   pixelToAxial,
   isAdjacent,
   isValidPath,
+  ringCenterForPath,
 } from './hex.js';
 
 describe('hex math', () => {
@@ -50,6 +51,13 @@ describe('hex math', () => {
     expect(isAdjacent(hex(0, 0), hex(1, 0))).toBe(true);
     expect(isAdjacent(hex(0, 0), hex(2, 0))).toBe(false);
     expect(isAdjacent(hex(0, 0), hex(0, 0))).toBe(false);
+  });
+
+  test('ringCenterForPath returns the enclosed hex for a six-tile ring walk', () => {
+    const center = hex(3, -1);
+    const ring = neighbors(center);
+    expect(ringCenterForPath(ring)).toEqual(center);
+    expect(ringCenterForPath([ring[0]!, ring[1]!, ring[2]!])).toBeNull();
   });
 
   test('isValidPath rejects non-adjacent steps and revisits', () => {

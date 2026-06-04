@@ -1,5 +1,15 @@
-import { axialToPixel, distance, hex, hexEquals, hexKey, neighbors } from '../hex.js';
-import { BEE_STATS, HEXES_PER_QUEEN_SLOT, HIVE, QUEEN_MIN_OWNED_HEXES } from '../bees.js';
+import {
+  axialToPixel,
+  distance,
+  hex,
+  hexEquals,
+  hexKey,
+  isValidPath,
+  neighbors,
+  ringCenterForPath,
+} from '../hex.js';
+import { BEE_STATS, HIVE, QUEEN_MIN_OWNED_HEXES } from '../bees.js';
+import { hexHpForTile, isQueenAssaultableTile, remainingHpForTile } from '../tileHp.js';
 import { makeRng } from '../letters.js';
 import type { Petal } from '../messages.js';
 import {
@@ -15,8 +25,12 @@ import {
   petalAt,
   pickQueenLandingHexForSide,
   pickQueenLandingHexWhileFlying,
+  queenApproachVoidHex,
   queenApproachVoidHexKeys,
+  queenAssaultHighlightHex,
+  hiveCentersFor,
   placeLetter,
+  hiveCountFor,
   queenAllowanceFor,
   queenPerimeterLandingHexKeys,
   trySubmitWord,
@@ -158,31 +172,18 @@ describe('engine: honey economy', () => {
   });
 });
 
-describe('engine: queen allowance scales with hive size', () => {
-  test('allowance is 1 + floor(tiles.length / HEXES_PER_QUEEN_SLOT)', () => {
+describe('engine: queen allowance equals hive count', () => {
+  test('allowance matches hiveCountFor', () => {
     const w = buildInitialWorld(fixedRng());
-    expect(queenAllowanceFor(getPlayer(w, "self"))).toBe(
-      1 + Math.floor(getPlayer(w, "self").tiles.length / HEXES_PER_QUEEN_SLOT),
-    );
-    // Stub a player at a specific tile count (formula depends only on length).
-    const sample = getPlayer(w, "self").tiles[0]!;
-    const tilesOfSize = (n: number) =>
-      Array.from({ length: n }, () => sample);
-    const playerWith = (n: number) => ({ ...getPlayer(w, "self"), tiles: tilesOfSize(n) });
-    expect(queenAllowanceFor(playerWith(0))).toBe(1);
-    expect(queenAllowanceFor(playerWith(11))).toBe(1);
-    expect(queenAllowanceFor(playerWith(12))).toBe(2);
-    expect(queenAllowanceFor(playerWith(23))).toBe(2);
-    expect(queenAllowanceFor(playerWith(24))).toBe(3);
-    expect(queenAllowanceFor(playerWith(36))).toBe(4);
+    expect(queenAllowanceFor(getPlayer(w, "self"))).toBe(hiveCountFor(getPlayer(w, "self")));
+    expect(queenAllowanceFor(getPlayer(w, "self"))).toBe(1);
   });
 
   test('dispatchQueen succeeds repeatedly until the allowance is reached', () => {
     const rng = fixedRng();
     let w = expandSelfToMinQueenTiles(buildInitialWorld(rng));
-    // Big stockpile + tile pool that generates a 3-queen allowance.
     const allowance = queenAllowanceFor(getPlayer(w, "self"));
-    expect(allowance).toBeGreaterThanOrEqual(2);
+    expect(allowance).toBe(1);
     w = setPlayerById(w, 'self', {
       ...getPlayer(w, 'self'),
       honey: BEE_STATS.queen.honeyCost * (allowance + 2),
@@ -230,7 +231,10 @@ describe('engine: queen allowance scales with hive size', () => {
     if (queen.state.kind !== 'queen-flying') {
       throw new Error('expected queen-flying state');
     }
-    expect(hexEquals(queen.state.landingHex, enemyActive.hex)).toBe(true);
+    const defender = secondPlayer(r.world);
+    expect(hexEquals(queen.state.landingHex, queenAssaultHighlightHex(defender, enemyActive.hex))).toBe(
+      true,
+    );
   });
 
   test('in-flight queen keeps chosen landing hex across engine ticks', () => {
@@ -253,6 +257,7 @@ describe('engine: queen allowance scales with hive size', () => {
     expect(q1?.state.kind).toBe('queen-flying');
     if (q1?.state.kind !== 'queen-flying') return;
     expect(hexEquals(q1.state.landingHex, outer.hex)).toBe(true);
+    expect(q1.state.flightPhase).toBeUndefined();
   });
 
   test('in-flight queen retargets when its landing tile is destroyed', () => {
@@ -275,7 +280,11 @@ describe('engine: queen allowance scales with hive size', () => {
     expect(q1?.state.kind).toBe('queen-flying');
     if (q1?.state.kind !== 'queen-flying') return;
     expect(hexEquals(q1.state.landingHex, outer.hex)).toBe(false);
-    expect(queenPerimeterLandingHexKeys(secondPlayer(cur)).has(hexKey(q1.state.landingHex))).toBe(true);
+    const hive = hiveCentersFor(secondPlayer(cur))[0]!;
+    expect(
+      hexEquals(q1.state.landingHex, hive) ||
+        queenPerimeterLandingHexKeys(secondPlayer(cur)).has(hexKey(q1.state.landingHex)),
+    ).toBe(true);
   });
 
   test('in-flight queen retargets inward when a rebuilt tile blocks the ingress path', () => {
@@ -348,6 +357,49 @@ describe('engine: queen allowance scales with hive size', () => {
     if (!r.ok) expect(r.reason).toBe('invalid queen target');
   });
 
+  test('queenAssaultHighlightHex never pulses storage — shows hive only when void reaches inner gate', () => {
+    const base = buildInitialWorld(fixedRng());
+    const defender = secondPlayer(base);
+    const hive = defender.tiles.find((t) => t.state === 'hive')!;
+    const storage = defender.tiles.find((t) => t.state === 'storage')!;
+    expect(storage).toBeDefined();
+    expect(queenAssaultHighlightHex(defender, storage!.hex)).not.toEqual(storage!.hex);
+    const cleared = setPlayerById(base, 'opponent', {
+      ...defender,
+      tiles: defender.tiles.filter(
+        (t) => !(isQueenAssaultableTile(t) && t.state !== 'hive'),
+      ),
+    });
+    expect(queenAssaultHighlightHex(secondPlayer(cleared), storage!.hex)).toEqual(hive.hex);
+  });
+
+  test('queenAssaultHighlightHex targets hive after outer assaultable ring is cleared', () => {
+    const base = buildInitialWorld(fixedRng());
+    const hive = secondPlayer(base).tiles.find((t) => t.state === 'hive')!;
+    const storage = secondPlayer(base).tiles.find((t) => t.state === 'storage')!;
+    const cleared = setPlayerById(base, 'opponent', {
+      ...secondPlayer(base),
+      tiles: secondPlayer(base).tiles.filter(
+        (t) => !(isQueenAssaultableTile(t) && t.state !== 'hive' && t.state !== 'storage'),
+      ),
+    });
+    expect(queenAssaultHighlightHex(secondPlayer(cleared), storage!.hex)).toEqual(hive.hex);
+  });
+
+  test('queenAssaultHighlightHex keeps landing when hive is not reachable via storage or void', () => {
+    const base = buildInitialWorld(fixedRng());
+    const landing = hex(4, 0);
+    const defender = setPlayerById(base, 'opponent', {
+      ...secondPlayer(base),
+      tiles: [
+        { hex: hex(0, 0), state: 'hive', letter: null, damage: 0, reuseCount: 0 },
+        { hex: landing, state: 'capped', letter: 'Z', damage: 0, reuseCount: 0 },
+        { hex: hex(5, 0), state: 'capped', letter: 'Y', damage: 0, reuseCount: 0 },
+      ],
+    });
+    expect(queenAssaultHighlightHex(secondPlayer(defender), landing)).toEqual(landing);
+  });
+
   test('pickQueenLandingHexForSide returns a perimeter hex aligned with that side', () => {
     const w = buildInitialWorld(fixedRng());
     const ring = queenPerimeterLandingHexKeys(secondPlayer(w));
@@ -363,17 +415,152 @@ describe('engine: queen allowance scales with hive size', () => {
     }
   });
 
-  test('dispatchQueen with attackSide lands on pickQueenLandingHexForSide hex', () => {
+  test('dispatchQueen with attackSide targets breach tile while outer ring stands', () => {
     const base = buildInitialWorld(fixedRng());
     let w = expandSelfToMinQueenTiles(base);
     w = setPlayerById(w, "self", { ...getPlayer(w, "self"), honey: BEE_STATS.queen.honeyCost + 1 });
-    const expected = pickQueenLandingHexForSide(secondPlayer(w), 'left');
+    const breach = pickQueenLandingHexForSide(secondPlayer(w), 'left');
     const r = dispatchQueen(w, 'self', { attackSide: 'left' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const queen = getPlayer(r.world, "self").bees[getPlayer(r.world, "self").bees.length - 1]!;
     if (queen.state.kind !== 'queen-flying') throw new Error('expected queen-flying');
-    expect(hexEquals(queen.state.landingHex, expected!)).toBe(true);
+    expect(hexEquals(queen.state.breachHex ?? breach!, breach!)).toBe(true);
+    expect(hexEquals(queen.state.landingHex, breach!)).toBe(true);
+    expect(queen.state.flightPhase).toBeUndefined();
+    expect(hexEquals(queen.state.flight.to.hex, breach!)).toBe(true);
+  });
+
+  test('queen walks along void corridor without breaking off-path owned tiles', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const defender = secondPlayer(w0);
+    const ring = queenPerimeterLandingHexKeys(defender);
+    const outer = defender.tiles.find((t) => ring.has(hexKey(t.hex)))!;
+    const gapWorld = setPlayerById(w0, 'opponent', {
+      ...defender,
+      tiles: defender.tiles.filter((t) => !hexEquals(t.hex, outer.hex)),
+    });
+    const offPathOwned = secondPlayer(gapWorld).tiles.filter(
+      (t) => isQueenAssaultableTile(t) && t.state !== 'hive' && ring.has(hexKey(t.hex)),
+    );
+    expect(offPathOwned.length).toBeGreaterThan(0);
+    const queenBee = {
+      id: 'queen-void-walk',
+      kind: 'queen' as const,
+      ownerId: getPlayer(w0, 'self').id,
+      capacity: 1,
+      state: {
+        kind: 'queen-assault' as const,
+        panel: 'opponent-hive' as const,
+        defenderPlayerId: 'opponent',
+        currentHex: outer.hex,
+        expiresAt: 200,
+        nextActionAt: 0,
+      },
+    };
+    const w: World = setPlayerById(gapWorld, 'self', {
+      ...getPlayer(w0, 'self'),
+      bees: [queenBee],
+    });
+    const after = tickWorld({ ...w, t: 1 }, 0, fixedRng());
+    const q = getPlayer(after, 'self').bees[0]!;
+    expect(q.state.kind).toBe('queen-assault');
+    if (q.state.kind !== 'queen-assault') return;
+    expect(hexEquals(q.state.currentHex, outer.hex)).toBe(false);
+    for (const t of offPathOwned) {
+      expect(remainingHpForTile(t)).toBe(hexHpForTile(t));
+    }
+  });
+
+  test('queen advances inward without oscillating on the void corridor', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const defender = secondPlayer(w0);
+    const ring = queenPerimeterLandingHexKeys(defender);
+    const breach = defender.tiles.find((t) => ring.has(hexKey(t.hex)))!;
+    const gapWorld = setPlayerById(w0, 'opponent', {
+      ...defender,
+      tiles: defender.tiles.filter((t) => !hexEquals(t.hex, breach.hex)),
+    });
+    const queenBee = {
+      id: 'queen-no-osc',
+      kind: 'queen' as const,
+      ownerId: getPlayer(w0, 'self').id,
+      capacity: 1,
+      state: {
+        kind: 'queen-assault' as const,
+        panel: 'opponent-hive' as const,
+        defenderPlayerId: 'opponent',
+        currentHex: breach.hex,
+        expiresAt: 300,
+        nextActionAt: 0,
+      },
+    };
+    let w: World = setPlayerById(gapWorld, 'self', {
+      ...getPlayer(w0, 'self'),
+      bees: [queenBee],
+    });
+    const seen: string[] = [];
+    for (let i = 0; i < 24; i++) {
+      w = { ...w, t: i + 1 };
+      w = tickWorld(w, 0, fixedRng());
+      const q = getPlayer(w, 'self').bees.find((b) => b.id === 'queen-no-osc');
+      if (!q || q.state.kind !== 'queen-assault') break;
+      const k = hexKey(q.state.currentHex);
+      if (seen.length >= 2) {
+        const prev = seen[seen.length - 1]!;
+        const prev2 = seen[seen.length - 2]!;
+        if (k === prev2 && k !== prev) {
+          throw new Error(`queen oscillating between ${prev2} and ${prev}`);
+        }
+      }
+      seen.push(k);
+    }
+    const q = getPlayer(w, 'self').bees.find((b) => b.id === 'queen-no-osc');
+    expect(q === undefined || w.phase === 'over').toBe(true);
+  });
+
+  test('queen reaches hive through a void gap without clearing the full ring', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const defender = secondPlayer(w0);
+    const hive = defender.tiles.find((t) => t.state === 'hive')!;
+    const ring = queenPerimeterLandingHexKeys(defender);
+    const breach = defender.tiles.find((t) => ring.has(hexKey(t.hex)))!;
+    const gapWorld = setPlayerById(w0, 'opponent', {
+      ...defender,
+      tiles: defender.tiles.filter((t) => !hexEquals(t.hex, breach.hex)),
+    });
+    expect(
+      secondPlayer(gapWorld).tiles.some(
+        (t) => isQueenAssaultableTile(t) && t.state !== 'hive' && ring.has(hexKey(t.hex)),
+      ),
+    ).toBe(true);
+    const storageBesideGap = neighbors(breach.hex).find((n) => {
+      const t = secondPlayer(gapWorld).tiles.find((tile) => hexEquals(tile.hex, n));
+      return t?.state === 'storage';
+    });
+    expect(storageBesideGap).toBeDefined();
+    const queenBee = {
+      id: 'queen-gap',
+      kind: 'queen' as const,
+      ownerId: getPlayer(w0, 'self').id,
+      capacity: 1,
+      state: {
+        kind: 'queen-assault' as const,
+        panel: 'opponent-hive' as const,
+        defenderPlayerId: 'opponent',
+        currentHex: storageBesideGap!,
+        expiresAt: 100,
+        nextActionAt: 0,
+      },
+    };
+    const w: World = setPlayerById(
+      { ...gapWorld, t: 1 },
+      'self',
+      { ...getPlayer(w0, 'self'), bees: [queenBee] },
+    );
+    const after = tickWorld(w, 0, fixedRng());
+    expect(after.phase).toBe('over');
+    expect(hiveCountFor(secondPlayer(after))).toBe(0);
   });
 
   test('dispatchQueen rejects both target and attackSide', () => {
@@ -390,7 +577,7 @@ describe('engine: queen allowance scales with hive size', () => {
 });
 
 describe('engine: queen hive breach', () => {
-  test('queen occupying the hive center ends the game', () => {
+  test('queen destroying the last hive eliminates the defender', () => {
     const w0 = buildInitialWorld(fixedRng());
     const queenBee = {
       id: 'queen-test',
@@ -410,9 +597,10 @@ describe('engine: queen hive breach', () => {
     const after = tickWorld(w, 0, fixedRng());
     expect(after.phase).toBe('over');
     expect(after.winnerId).toBe('self');
+    expect(hiveCountFor(secondPlayer(after))).toBe(0);
   });
 
-  test('queen destroying a storage hex ends the game', () => {
+  test('queen on storage does not strike the hive while void path to inner gate is sealed', () => {
     const w0 = buildInitialWorld(fixedRng());
     const storage = secondPlayer(w0).tiles.find((t) => t.state === 'storage')!;
     const queenBee = {
@@ -434,18 +622,148 @@ describe('engine: queen hive breach', () => {
       'self',
       { ...getPlayer(w0, "self"), bees: [queenBee] },
     );
-    const w2 = setPlayerById(w, 'opponent', {
-        ...secondPlayer(w0),
-        tiles: secondPlayer(w0).tiles.map((t) =>
-          hexEquals(t.hex, storage.hex) ? { ...t, damage: 0.75 } : t,
-        ),
-      });
-    const after = tickWorld(w2, 0, fixedRng());
+    const after = tickWorld(w, 0, fixedRng());
+    expect(after.phase).toBe('playing');
+    expect(hiveCountFor(secondPlayer(after))).toBe(1);
+    expect(secondPlayer(after).tiles.find((t) => hexEquals(t.hex, storage.hex))?.damage ?? 0).toBe(0);
+  });
+
+  test('queen never damages storage or idles on storage hexes', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const storage = secondPlayer(w0).tiles.find((t) => t.state === 'storage')!;
+    const queenBee = {
+      id: 'queen-storage-pass',
+      kind: 'queen' as const,
+      ownerId: getPlayer(w0, 'self').id,
+      capacity: 1,
+      state: {
+        kind: 'queen-assault' as const,
+        panel: 'opponent-hive' as const,
+        defenderPlayerId: 'opponent',
+        currentHex: storage.hex,
+        expiresAt: 200,
+        nextActionAt: 0,
+      },
+    };
+    let w: World = setPlayerById(w0, 'self', { ...getPlayer(w0, 'self'), bees: [queenBee] });
+    for (let i = 0; i < 8; i++) {
+      w = { ...w, t: i + 1 };
+      w = tickWorld(w, 0, fixedRng());
+      for (const t of secondPlayer(w).tiles.filter((x) => x.state === 'storage')) {
+        expect(t.damage ?? 0).toBe(0);
+      }
+      const q = getPlayer(w, 'self').bees.find((b) => b.id === 'queen-storage-pass');
+      if (!q || q.state.kind !== 'queen-assault') break;
+      const here = secondPlayer(w).tiles.find((t) => hexEquals(t.hex, q.state.currentHex));
+      expect(here?.state).not.toBe('storage');
+    }
+  });
+
+  test('destroying a hive removes its storage ring and stored letters', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const storage = secondPlayer(w0).tiles.find((t) => t.state === 'storage')!;
+    const w1 = setPlayerById(w0, 'opponent', {
+      ...secondPlayer(w0),
+      tiles: secondPlayer(w0).tiles.map((t) =>
+        hexEquals(t.hex, storage.hex) ? { ...t, letter: 'Z' as const } : t,
+      ),
+    });
+    const queenBee = {
+      id: 'queen-test',
+      kind: 'queen' as const,
+      ownerId: getPlayer(w1, "self").id,
+      capacity: 1,
+      state: {
+        kind: 'queen-assault' as const,
+        panel: 'opponent-hive' as const,
+        defenderPlayerId: 'opponent',
+        currentHex: hex(0, 0),
+        expiresAt: 100,
+        nextActionAt: 0,
+      },
+    };
+    const w: World = setPlayerById({ ...w1, t: 1 }, 'self', {
+      ...getPlayer(w1, "self"),
+      bees: [queenBee],
+    });
+    const after = tickWorld(w, 0, fixedRng());
     expect(after.phase).toBe('over');
-    expect(after.winnerId).toBe('self');
-    expect(secondPlayer(after).tiles.some((t) => t.state === 'storage' && hexEquals(t.hex, storage.hex))).toBe(
-      false,
-    );
+    expect(secondPlayer(after).tiles.some((t) => t.state === 'storage')).toBe(false);
+    expect(secondPlayer(after).freedLetters?.some((f) => f.letter === 'Z')).toBeFalsy();
+  });
+});
+
+describe('engine: satellite hive founding', () => {
+  test('capping completes a six-letter ring and founds a new hive with storage', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const center = hex(3, -1);
+    const ring = neighbors(center);
+    const letters = ['F', 'R', 'O', 'Z', 'E', 'N'] as const;
+    const ringKeys = new Set(ring.map(hexKey));
+    w = setPlayerById(w, 'self', {
+      ...getPlayer(w, 'self'),
+      honey: 20,
+      tiles: [
+        ...getPlayer(w, 'self').tiles.filter((t) => !hexEquals(t.hex, center) && !ringKeys.has(hexKey(t.hex))),
+        { hex: center, state: 'active' as const, letter: null, reuseCount: 0, damage: 0 },
+        ...ring.map((h, i) => ({
+          hex: h,
+          state: 'capped' as const,
+          letter: letters[i]!,
+          reuseCount: 0,
+          damage: 0,
+        })),
+      ],
+    });
+    const path = [ring[4]!, ring[5]!];
+    const submit = trySubmitWord(w, 'self', [path]);
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+    const after = advance(submit.world, 1.5, rng);
+    expect(hiveCountFor(getPlayer(after, 'self'))).toBe(2);
+    const centerTile = getPlayer(after, 'self').tiles.find((t) => hexEquals(t.hex, center));
+    expect(centerTile?.state).toBe('hive');
+    expect(getPlayer(after, 'self').tiles.filter((t) => t.state === 'storage').length).toBe(12);
+  });
+
+  test('void center inside a capped ring founds a hive when submitting the six-letter path', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const center = hex(3, -1);
+    const ring = neighbors(center);
+    const letters = ['F', 'R', 'O', 'Z', 'E', 'N'] as const;
+    const ringKeys = new Set(ring.map(hexKey));
+    const path = [...ring];
+    expect(isValidPath(path)).toBe(true);
+    expect(ringCenterForPath(path)).toEqual(center);
+    w = setPlayerById(w, 'self', {
+      ...getPlayer(w, 'self'),
+      honey: 30,
+      tiles: [
+        ...getPlayer(w, 'self').tiles.filter((t) => !ringKeys.has(hexKey(t.hex))),
+        ...ring.map((h, i) => ({
+          hex: h,
+          state: 'letter' as const,
+          letter: letters[i]!,
+          reuseCount: 0,
+          damage: 0,
+        })),
+      ],
+    });
+    expect(getPlayer(w, 'self').tiles.some((t) => hexEquals(t.hex, center))).toBe(false);
+    const submit = trySubmitWord(w, 'self', [path]);
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+    expect(hiveCountFor(getPlayer(submit.world, 'self'))).toBe(2);
+    expect(
+      getPlayer(submit.world, 'self').tiles.find((t) => hexEquals(t.hex, center))?.state,
+    ).toBe('hive');
+    for (const h of ring) {
+      const slot = getPlayer(submit.world, 'self').tiles.find((t) => hexEquals(t.hex, h));
+      expect(slot?.state).toBe('storage');
+      expect(slot?.letter).toBeNull();
+    }
   });
 });
 
@@ -1236,6 +1554,179 @@ describe('engine: N-player FFA', () => {
     expect(snap.opponents).toHaveLength(3);
     expect(snap.opponentSlots).toEqual(['right', 'above', 'below']);
     expect(snap.playerCount).toBe(4);
+  });
+});
+
+describe('engine: special tiles', () => {
+  test('resolveWordFromPath resolves wildcard specials to a dictionary word', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const active = getPlayer(w, 'self').tiles.find((t) => t.state === 'active' && !t.letter)!;
+    w = setPlayerById(w, 'self', {
+      ...getPlayer(w, 'self'),
+      honey: 20,
+      tiles: getPlayer(w, 'self').tiles.map((t) =>
+        hexEquals(t.hex, active.hex)
+          ? { ...t, specialKind: 'crown' as const, letter: null }
+          : hexEquals(t.hex, neighbors(active.hex)[0]!)
+            ? { ...t, letter: 'E' as const, state: 'active' as const }
+            : hexEquals(t.hex, neighbors(active.hex)[1]!)
+              ? { ...t, letter: 'N' as const, state: 'active' as const }
+              : t,
+      ),
+    });
+    const n0 = neighbors(active.hex)[0]!;
+    const n1 = neighbors(active.hex)[1]!;
+    const path = [active.hex, n0, n1];
+    const submit = trySubmitWord(w, 'self', [path]);
+    expect(submit.ok).toBe(true);
+  });
+
+  test('crown cap permanently buffs queen strike rate', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const self = getPlayer(w, 'self');
+    const active = self.tiles.find((t) => t.state === 'active' && !t.letter)!;
+    const n0 = neighbors(active.hex)[0]!;
+    const n1 = neighbors(active.hex)[1]!;
+    w = setPlayerById(w, 'self', {
+      ...self,
+      honey: 20,
+      tiles: self.tiles.map((t) =>
+        hexEquals(t.hex, active.hex)
+          ? { ...t, specialKind: 'crown' as const, letter: null }
+          : hexEquals(t.hex, n0)
+            ? { ...t, letter: 'A' as const, state: 'active' as const }
+            : hexEquals(t.hex, n1)
+              ? { ...t, letter: 'N' as const, state: 'active' as const }
+              : t,
+      ),
+    });
+    const submit = trySubmitWord(w, 'self', [[active.hex, n0, n1]]);
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+    const after = advance(submit.world, 2, rng);
+    expect(getPlayer(after, 'self').queenStrikeBuffs).toBe(1);
+  });
+
+  test('castle cap adds reuse armor rings to itself and neighbors', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const self = getPlayer(w, 'self');
+    const active = self.tiles.find((t) => t.state === 'active' && !t.letter)!;
+    const n0 = neighbors(active.hex)[0]!;
+    const n1 = neighbors(active.hex)[1]!;
+    w = setPlayerById(w, 'self', {
+      ...self,
+      honey: 20,
+      tiles: self.tiles.map((t) =>
+        hexEquals(t.hex, active.hex)
+          ? { ...t, specialKind: 'castle' as const, letter: null }
+          : hexEquals(t.hex, n0)
+            ? { ...t, letter: 'A' as const, state: 'active' as const }
+            : hexEquals(t.hex, n1)
+              ? { ...t, letter: 'N' as const, state: 'active' as const }
+              : t,
+      ),
+    });
+    const submit = trySubmitWord(w, 'self', [[active.hex, n0, n1]]);
+    expect(submit.ok).toBe(true);
+    if (!submit.ok) return;
+    const after = advance(submit.world, 2, rng);
+    const player = getPlayer(after, 'self');
+    const castleTile = player.tiles.find((t) => hexEquals(t.hex, active.hex));
+    const neighborTile = player.tiles.find((t) => hexEquals(t.hex, n0));
+    expect(castleTile?.reuseCount).toBe(2);
+    expect(neighborTile?.reuseCount).toBe(2);
+  });
+
+  test('castle effect does not retrigger when its letter is reused', () => {
+    const rng = fixedRng();
+    let w = buildInitialWorld(rng);
+    const self = getPlayer(w, 'self');
+    const active = self.tiles.find((t) => t.state === 'active' && !t.letter)!;
+    const n0 = neighbors(active.hex)[0]!;
+    const n1 = neighbors(active.hex)[1]!;
+    w = setPlayerById(w, 'self', {
+      ...self,
+      honey: 40,
+      tiles: self.tiles.map((t) =>
+        hexEquals(t.hex, active.hex)
+          ? { ...t, specialKind: 'castle' as const, letter: null }
+          : hexEquals(t.hex, n0)
+            ? { ...t, letter: 'A' as const, state: 'active' as const }
+            : hexEquals(t.hex, n1)
+              ? { ...t, letter: 'N' as const, state: 'active' as const }
+              : t,
+      ),
+    });
+    const first = trySubmitWord(w, 'self', [[active.hex, n0, n1]]);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    let mid = advance(first.world, 2, rng);
+    const castleAfterFirst = getPlayer(mid, 'self').tiles.find((t) =>
+      hexEquals(t.hex, active.hex),
+    );
+    expect(castleAfterFirst?.reuseCount).toBe(2);
+    expect(castleAfterFirst?.specialKind).toBeUndefined();
+
+    const player = getPlayer(mid, 'self');
+    const n2 = neighbors(active.hex).find(
+      (h) =>
+        !hexEquals(h, n0) &&
+        !hexEquals(h, n1) &&
+        player.tiles.some((t) => hexEquals(t.hex, h)),
+    )!;
+    const n3 = neighbors(n2).find(
+      (h) =>
+        !hexEquals(h, active.hex) &&
+        player.tiles.some((t) => hexEquals(t.hex, h)),
+    )!;
+    mid = setPlayerById(mid, 'self', {
+      ...player,
+      tiles: player.tiles.map((t) =>
+        hexEquals(t.hex, n2)
+          ? { ...t, letter: 'E' as const, state: 'active' as const }
+          : hexEquals(t.hex, n3)
+            ? { ...t, letter: 'T' as const, state: 'active' as const }
+            : t,
+      ),
+    });
+    const second = trySubmitWord(mid, 'self', [[active.hex, n2, n3]]);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const after = advance(second.world, 2, rng);
+    const castleAfterSecond = getPlayer(after, 'self').tiles.find((t) =>
+      hexEquals(t.hex, active.hex),
+    );
+    expect(castleAfterSecond?.reuseCount).toBe(3);
+  });
+
+  test('bomb tiles are hidden from non-owner snapshots', () => {
+    const w0 = buildInitialWorld(fixedRng());
+    const bombHex = hex(2, 0);
+    const w = setPlayerById(w0, 'self', {
+      ...getPlayer(w0, 'self'),
+      tiles: getPlayer(w0, 'self').tiles.map((t) =>
+        hexEquals(t.hex, bombHex)
+          ? {
+              ...t,
+              state: 'capped' as const,
+              specialKind: 'bomb' as const,
+              bombOwnerId: 'self',
+              letter: null,
+              resolvedLetter: 'X' as const,
+            }
+          : t,
+      ),
+    });
+    const selfSnap = worldToSnapshot(w, 'self', 1);
+    const oppSnap = worldToSnapshot(w, 'opponent', 1);
+    const selfTile = selfSnap.self.tiles.find((t) => hexEquals(t.hex, bombHex));
+    const oppTile = oppSnap.self.tiles.find((t) => hexEquals(t.hex, bombHex));
+    expect(selfTile?.specialKind).toBe('bomb');
+    expect(oppTile?.specialKind).toBeUndefined();
+    expect(oppTile?.letter).toBeNull();
   });
 });
 

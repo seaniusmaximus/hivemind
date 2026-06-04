@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   activeQueenCountFor,
   axialToPixel,
@@ -18,8 +11,12 @@ import {
   isAdjacent,
   letterValue,
   queenAllowanceFor,
+  queenAssaultHighlightHex,
   remainingHpForTile,
-  tileHasDraftableLetter,
+  resolveWordFromPath,
+  specialTileIcon,
+  tileHasDraftableContent,
+  tileShowsSpecialIcon,
   type Hex,
   type PlayerState,
   type TileSnapshot,
@@ -41,7 +38,6 @@ interface Props {
   side?: 'self';
   /** Index into `world.opponents` for rival full-board panels (2–4). */
   opponentIndex?: number;
-  honeyLabel?: ReactNode;
 }
 
 const OPPONENT_PANELS: readonly BeePanel[] = [
@@ -140,7 +136,7 @@ const EMPTY_RIVAL: PlayerState = {
   bestWordScore: 0,
 };
 
-export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
+export const HiveGrid = ({ side, opponentIndex = 0 }: Props) => {
   const isSelf = side === 'self';
   const rival = useGameStore((s) => (isSelf ? undefined : s.world.opponents[opponentIndex]));
   const player = useGameStore((s) =>
@@ -239,6 +235,7 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
       if (
         !tile ||
         tile.letter ||
+        tile.specialKind ||
         (tile.state !== 'active' && tile.state !== 'storage')
       ) {
         continue;
@@ -407,11 +404,11 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
     const keys = new Set<string>();
     for (const b of attackerBees) {
       if (b.kind === 'queen' && b.state.kind === 'queen-flying') {
-        keys.add(hexKey(b.state.landingHex));
+        keys.add(hexKey(queenAssaultHighlightHex(player, b.state.landingHex)));
       }
     }
     return keys;
-  }, [attackerBees]);
+  }, [attackerBees, player]);
 
   const allHexes = useMemo(() => positioned.map((t) => t.hex), [positioned]);
   const extent = useMemo(
@@ -509,7 +506,8 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
       // No active capture — ignore.
     }
     const uncappedCombLetter =
-      (tile.state === 'active' || tile.state === 'letter') && !!tile.letter;
+      (tile.state === 'active' || tile.state === 'letter') &&
+      (!!tile.letter || !!tile.specialKind);
     if (!uncappedCombLetter) {
       pendingLetterAnchorRef.current = null;
     }
@@ -546,7 +544,7 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
       dispatchQueen('self');
       return;
     }
-    if (tile.state === 'storage' && tile.letter) {
+    if (tile.state === 'storage' && (tile.letter || tile.specialKind)) {
       dragModeRef.current = 'letter-move';
       startLetterDrag(h);
       return;
@@ -576,23 +574,24 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
     if (!interactive) return;
     if (dragModeRef.current === 'letter-move') {
       const isDropSlot =
-        (tile.state === 'active' && !tile.letter) ||
-        (tile.state === 'storage' && !tile.letter);
+        (tile.state === 'active' && !tile.letter && !tile.specialKind) ||
+        (tile.state === 'storage' && !tile.letter && !tile.specialKind);
       setDropHover(isDropSlot ? h : null);
       return;
     }
     if (dragModeRef.current === 'word-draft') {
-      if (tileHasDraftableLetter(tile)) extendDraft(h);
+      if (tileHasDraftableContent(tile)) extendDraft(h);
       return;
     }
     const anchor = pendingLetterAnchorRef.current;
     if (anchor !== null && !hexEquals(anchor, h)) {
       const tileA = tiles.find((t) => hexEquals(t.hex, anchor));
       const canLiftFromComb =
-        !!tileA?.letter && (tileA.state === 'active' || tileA.state === 'letter');
+        !!(tileA?.letter || tileA?.specialKind) &&
+        (tileA.state === 'active' || tileA.state === 'letter');
       const isDropSlot =
-        (tile.state === 'active' && !tile.letter) ||
-        (tile.state === 'storage' && !tile.letter);
+        (tile.state === 'active' && !tile.letter && !tile.specialKind) ||
+        (tile.state === 'storage' && !tile.letter && !tile.specialKind);
       if (canLiftFromComb && isDropSlot) {
         pendingLetterAnchorRef.current = null;
         startLetterDrag(anchor);
@@ -600,7 +599,7 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
         setDropHover(h);
         return;
       }
-      if (canLiftFromComb && tileHasDraftableLetter(tile) && isAdjacent(anchor, h)) {
+      if (canLiftFromComb && tileHasDraftableContent(tile) && isAdjacent(anchor, h)) {
         pendingLetterAnchorRef.current = null;
         startDraft(anchor);
         extendDraft(h);
@@ -650,12 +649,16 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
       <h2 className="hud-title grid-heading">
         {isSelf ? 'YOUR HIVE' : isEliminatedRival ? 'RIVAL HIVE (eliminated)' : 'RIVAL HIVE'}
       </h2>
-      {isSelf && honeyLabel}
-      {isSelf && (
+      {isSelf ? (
         <p className="grid-subtitle">
           hold a frontier tile {holdSeconds}s to build · {carpenterCost}🜨
         </p>
+      ) : (
+        <p className="grid-subtitle grid-subtitle--reserve" aria-hidden="true">
+          {' '}
+        </p>
       )}
+      <div className="panel-nav-spacer" aria-hidden="true" />
       <div ref={canvasRef} className="hive-field-canvas hive-field-canvas--zoomable" data-tutorial-target="hive-grid">
         <svg
           ref={svgRef}
@@ -689,7 +692,8 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
           const isDropTarget =
             interactive &&
             !!letterDrag &&
-            ((t.state === 'active' && !t.letter) || (t.state === 'storage' && !t.letter));
+            ((t.state === 'active' && !t.letter && !t.specialKind) ||
+              (t.state === 'storage' && !t.letter && !t.specialKind));
           const isDropHover =
             isDropTarget &&
             dropHover !== null &&
@@ -704,10 +708,11 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
           // Each reuse adds 0.5 HP of armor (one ring). Queen strikes deal 1 HP,
           // so each hit peels two rings. Rings peel from the outside in.
           const reuseLevel = Math.max(0, reuseCount - Math.floor(damage * 2));
+          const showSpecialIcon = tileShowsSpecialIcon(t);
           const interactiveTile =
             interactive &&
-            ((t.state === 'storage' && !!t.letter) ||
-              (t.state === 'active' && !!t.letter) ||
+            ((t.state === 'storage' && (!!t.letter || !!t.specialKind)) ||
+              (t.state === 'active' && (!!t.letter || !!t.specialKind)) ||
               t.state === 'letter' ||
               t.state === 'capped' ||
               isDropTarget ||
@@ -737,8 +742,11 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
                       ? 'storage-ring'
                       : undefined
                 }
-                data-uncapped-letter={t.state === 'active' && !!t.letter ? true : undefined}
-                data-filled={t.state === 'storage' && !!t.letter}
+                data-uncapped-letter={
+                  t.state === 'active' && (!!t.letter || !!t.specialKind) ? true : undefined
+                }
+                data-filled={t.state === 'storage' && (!!t.letter || !!t.specialKind)}
+                data-special={t.specialKind ?? undefined}
                 data-draft={drafted}
                 data-draft-idx={draftIdx ?? undefined}
                 data-carpenter-eligible={isCarpenterEligible}
@@ -786,13 +794,23 @@ export const HiveGrid = ({ side, opponentIndex = 0, honeyLabel }: Props) => {
                 />
               )}
               {t.state === 'hive' && (
-                <text className="hive-honey" x={0} y={0}>
+                <text
+                  className="hive-honey"
+                  x={0}
+                  y={0}
+                  {...(isSelf ? { 'data-tutorial-target': 'honey-label' } : {})}
+                >
                   {Math.floor(player.honey)}
                 </text>
               )}
               {t.state === 'hive' && canSpawnQueen && (
                 <text className="queen-ready-glyph" x={0} y={-19}>
                   👑
+                </text>
+              )}
+              {showSpecialIcon && !hideLetter && (
+                <text className="hex-letter special-tile-icon" x={0} y={0}>
+                  {specialTileIcon(t.specialKind!)}
                 </text>
               )}
               {t.letter && !hideLetter && (

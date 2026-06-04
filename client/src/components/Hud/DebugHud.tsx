@@ -1,4 +1,4 @@
-import { honeyCapFor } from '@hivemind/shared';
+import { honeyCapFor, specialTileIcon, SPECIAL_TILE_KINDS } from '@hivemind/shared';
 import { useEffect } from 'react';
 import { useGameStore } from '../../state/gameStore.js';
 
@@ -21,6 +21,7 @@ export const DebugHud = () => {
   const oppCap = honeyCapFor(opponent);
   const spawnQueen = useGameStore((s) => s.debugSpawnQueen);
   const adjustHoney = useGameStore((s) => s.debugAdjustHoney);
+  const giveSpecialTiles = useGameStore((s) => s.debugGiveSpecialTiles);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -99,6 +100,14 @@ export const DebugHud = () => {
                   {d > 0 ? `+${d}` : d}
                 </button>
               ))}
+            </div>
+          </div>
+          <div className="debug-hud-section">
+            <div className="debug-hud-label">Special tiles</div>
+            <div className="debug-hud-row">
+              <button type="button" onClick={() => giveSpecialTiles()}>
+                Give all ({SPECIAL_TILE_KINDS.map((k) => specialTileIcon(k)).join(' ')})
+              </button>
             </div>
           </div>
         </>

@@ -20,6 +20,8 @@ import {
   queenAllowanceFor,
   tickSolo,
   tickWorld,
+  resolveWordFromPath,
+  SPECIAL_TILE_KINDS,
   tileHasDraftableLetter,
   type BeePanel,
   type CommandResult,
@@ -32,6 +34,7 @@ import {
   type QueenAttackSide,
   type ServerMessage,
   type Side,
+  type SpecialTileKind,
   type TileSnapshot,
   type World,
   type WorldSnapshot,
@@ -221,7 +224,8 @@ const wrapSoloWorld = (world: World): ClientWorld => toClientWorld(world, 'self'
 
 export interface LetterDrag {
   readonly fromHex: Hex;
-  readonly letter: Letter;
+  readonly letter?: Letter;
+  readonly specialKind?: SpecialTileKind;
 }
 
 /**
@@ -356,6 +360,8 @@ interface GameStore {
   debugSpawnQueen: (toward: 'towardRival' | 'towardSelf') => void;
   /** Add honey on the given side (clamped at zero). */
   debugAdjustHoney: (side: Side, delta: number) => void;
+  /** Fill empty storage with one of each special tile kind (solo only). */
+  debugGiveSpecialTiles: () => void;
 
   initSolo: (seed?: number) => void;
   /** Begin a local match from the title screen (applies {@link soloDifficulty}). */
@@ -494,11 +500,10 @@ const snapshotToWorld = (snap: WorldSnapshot): ClientWorld => {
 const tileAtSelf = (world: ClientWorld, h: Hex): TileSnapshot | undefined =>
   world.self.tiles.find((t) => hexEquals(t.hex, h));
 
-const draftToWord = (world: ClientWorld, path: readonly Hex[]): string =>
-  path
-    .map((h) => tileAtSelf(world, h)?.letter ?? '')
-    .join('')
-    .toUpperCase();
+const draftToWord = (world: ClientWorld, path: readonly Hex[]): string => {
+  const resolved = resolveWordFromPath(path, world.self.tiles);
+  return resolved?.word.toUpperCase() ?? '';
+};
 
 /** Held in module scope so tests can inject a fake via `_setConnection`. */
 let conn: NetConnection | null = null;
@@ -658,6 +663,62 @@ export const useGameStore = create<GameStore>((set, get) => {
       const nextHoney = Math.max(0, p.honey + delta);
       const base = setPlayerById(s.world, side, { ...p, honey: nextHoney });
       return { world: toClientWorld(base, 'self') };
+    });
+  },
+
+  debugGiveSpecialTiles: () => {
+    if (!get().debugMode) return;
+    if (get().mode !== 'solo') {
+      get().pushToast({
+        text: 'debug: solo mode only',
+        panel: 'self-hive',
+        hex: { q: 0, r: 0 },
+        variant: 'info',
+      });
+      return;
+    }
+    const self = get().world.self;
+    const emptySlots: TileSnapshot[] = [];
+    for (const t of self.tiles) {
+      if (t.state === 'storage' && !t.letter && !t.specialKind) {
+        emptySlots.push(t);
+      }
+    }
+    for (const t of self.tiles) {
+      if (emptySlots.length >= SPECIAL_TILE_KINDS.length) break;
+      if (t.state === 'active' && !t.letter && !t.specialKind) {
+        emptySlots.push(t);
+      }
+    }
+    if (emptySlots.length < SPECIAL_TILE_KINDS.length) {
+      get().pushToast({
+        text: `debug: need ${SPECIAL_TILE_KINDS.length} empty slots (${emptySlots.length} free)`,
+        panel: 'self-hive',
+        hex: { q: 0, r: 0 },
+        variant: 'error',
+      });
+      return;
+    }
+    const kindsByHex = new Map(
+      SPECIAL_TILE_KINDS.map((kind, i) => [hexKey(emptySlots[i]!.hex), kind]),
+    );
+    const updatedTiles = self.tiles.map((t) => {
+      const kind = kindsByHex.get(hexKey(t.hex));
+      if (!kind) return t;
+      return {
+        ...t,
+        letter: null,
+        specialKind: kind,
+        ...(kind === 'bomb' ? { bombOwnerId: self.id } : {}),
+      };
+    });
+    const base = setPlayerById(get().world, 'self', { ...self, tiles: updatedTiles });
+    set({ world: toClientWorld(base, 'self') });
+    get().pushToast({
+      text: 'debug: all special tiles in storage',
+      panel: 'self-hive',
+      hex: emptySlots[0]!.hex,
+      variant: 'info',
     });
   },
 
@@ -1026,13 +1087,17 @@ export const useGameStore = create<GameStore>((set, get) => {
   startLetterDrag: (fromHex) => {
     set((s) => {
       const tile = tileAtSelf(s.world, fromHex);
-      if (!tile?.letter) return s;
+      if (!tile?.letter && !tile?.specialKind) return s;
       if (tile.state === 'capped') return s;
       if (tile.state !== 'storage' && tile.state !== 'active' && tile.state !== 'letter') {
         return s;
       }
       return {
-        letterDrag: { fromHex, letter: tile.letter },
+        letterDrag: {
+          fromHex,
+          ...(tile.letter ? { letter: tile.letter } : {}),
+          ...(tile.specialKind ? { specialKind: tile.specialKind } : {}),
+        },
         dropHover: null,
         lastError: null,
       };
@@ -1049,6 +1114,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       const okSlot =
         !!tile &&
         !tile.letter &&
+        !tile.specialKind &&
         (tile.state === 'active' || tile.state === 'storage');
       if (!okSlot) return { dropHover: null };
       return { dropHover: h };
@@ -1176,6 +1242,9 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
       const submittedWord = word;
+      if (get().debugMode) {
+        console.log('[debug] word spelled:', submittedWord);
+      }
       set((s) => {
         let tutorialStep = s.tutorialStep;
         let tutorialPaused = s.tutorialPaused;

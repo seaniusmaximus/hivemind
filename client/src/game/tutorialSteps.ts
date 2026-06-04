@@ -8,11 +8,7 @@ export type TutorialTarget =
   | 'storage-ring'
   | 'hive-grid'
   | 'queen-spawn'
-  | 'panel-nav'
-  | 'panel-arrow-right'
-  | 'panel-arrow-left'
-  | 'panel-arrow-up'
-  | 'panel-arrow-down';
+  | 'panel-nav';
 
 export type TutorialStepId =
   | '1a-hive'
@@ -121,7 +117,7 @@ export const TUTORIAL_STEPS: Record<
     panel: 0,
     targets: ['panel-nav'],
     body:
-      'Use the navigation pad in the top-right corner to move between your hive, the flower field, and rival hives. Left and right follow the middle row; up and down jump to rivals above and below when playing with three or four players.',
+      'Use the navigation pad below the panel title and hint line. Tap YOUR HIVE, the flower icon, or RIVAL to jump between boards. Extra rival buttons appear above and below in larger matches.',
     sectionEnd: true,
   },
   '4a-queen': {
@@ -129,7 +125,7 @@ export const TUTORIAL_STEPS: Record<
     panel: 0,
     targets: ['queen-spawn'],
     body:
-      'Once you have accumulated enough honey for the colony, you may spawn a Queen to assault the rival hive. Click the Spawn Queen button then select your angle of attack on the rival hive. Queens slowly approach the rival hive and assault their colony from your chosen direction. If a Queen breaches the colony storage that player\'s colony collapses and they lose the game. Bee ready.',
+      'Once your colony is large enough, spawn a Queen to assault a rival hive. You may field one Queen per hive you control — found new hives by capping a valid six-letter word in a ring around a central hex. Queens march toward hive cores; storage slots cannot be broken. Destroy every rival hive to eliminate them. Bee ready.',
     sectionEnd: true,
   },
 };

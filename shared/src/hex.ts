@@ -111,6 +111,24 @@ const cubeRound = (qf: number, rf: number): Hex => {
 /** Whether two hexes are exactly one step apart. */
 export const isAdjacent = (a: Hex, b: Hex): boolean => distance(a, b) === 1;
 
+/**
+ * If `path` visits exactly the six hexes ringing some cell (and not the center
+ * itself), return that center. Used for satellite-hive founding.
+ */
+export const ringCenterForPath = (path: readonly Hex[]): Hex | null => {
+  if (path.length !== 6) return null;
+  const pathKeys = new Set(path.map(hexKey));
+  if (pathKeys.size !== 6) return null;
+  for (const tile of path) {
+    for (const candidate of neighbors(tile)) {
+      if (pathKeys.has(hexKey(candidate))) continue;
+      const ring = neighbors(candidate);
+      if (ring.every((h) => pathKeys.has(hexKey(h)))) return candidate;
+    }
+  }
+  return null;
+};
+
 /** Whether `path` is a contiguous, non-revisiting walk on the hex grid. */
 export const isValidPath = (path: readonly Hex[]): boolean => {
   if (path.length === 0) return false;

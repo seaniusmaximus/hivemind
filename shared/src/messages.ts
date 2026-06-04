@@ -1,5 +1,6 @@
 import type { Hex } from './hex.js';
 import type { FlowerType, Letter } from './letters.js';
+import type { SpecialTileKind } from './specialTiles.js';
 import type { Bee } from './bees.js';
 
 /** ----- Engine + wire shared primitives ----- */
@@ -152,7 +153,9 @@ export interface WorldSnapshot {
  */
 export interface Petal {
   readonly hex: Hex;
-  readonly letter: Letter;
+  /** Present on normal petals; special petals use {@link specialKind} instead. */
+  readonly letter?: Letter;
+  readonly specialKind?: SpecialTileKind;
   /** Engine-time at which this petal naturally falls off. */
   readonly witherAt: number;
 }
@@ -173,12 +176,15 @@ export interface FlowerPatch {
   /** Bonus patch from a pollen bloom; decays normally and is excluded from the
    *  core 1-of-each-type field maintenance. */
   readonly pollenBloom?: boolean;
+  /** Orange special-flower variant: petals carry wildcard specials instead of letters. */
+  readonly specialFlower?: boolean;
 }
 
 /** Back-compat: a single pickable petal flattened for older consumers. */
 export interface FlowerSnapshot {
   readonly hex: Hex;
-  readonly letter: Letter;
+  readonly letter?: Letter;
+  readonly specialKind?: SpecialTileKind;
   readonly type: FlowerType;
   readonly patchId: string;
 }
@@ -199,6 +205,14 @@ export interface PlayerState {
   /** Highest-scoring word this player capped this match (honey paid at cap). */
   readonly bestWord: string;
   readonly bestWordScore: number;
+  /** Stacked crown specials — faster queen strikes and more damage. */
+  readonly queenStrikeBuffs?: number;
+  /** Hammer special: auto-expand frontier until this engine time. */
+  readonly hammerExpansionUntil?: number;
+  /** Hammer special: word center for circular outward expansion. */
+  readonly hammerExpansionCenter?: Hex;
+  /** Hex keys already activated during the current hammer expansion. */
+  readonly hammerExpansionVisited?: readonly string[];
 }
 
 export interface FreedLetter {
@@ -212,7 +226,7 @@ export interface FreedLetter {
 export interface TileSnapshot {
   readonly hex: Hex;
   /**
-   * - `hive`: central hive tile (radius 0). Not playable.
+   * - `hive`: hive core tile (one per colony cluster). Not playable; 1 HP.
    * - `storage`: one of the six slots adjacent to the hive (radius 1). Holds a
    *   delivered-but-unplaced letter. Empty when `letter === null`.
    * - `active`: playable honeycomb tile. May be empty (`letter === null`) or
@@ -236,4 +250,14 @@ export interface TileSnapshot {
    * submission that includes it.
    */
   readonly reuseCount?: number;
+  /** Wildcard special while uncapped; cleared after the effect resolves. */
+  readonly specialKind?: SpecialTileKind;
+  /** Letter the wildcard stood for when capped (set when the effect fires). */
+  readonly resolvedLetter?: Letter;
+  /** Castle fortification bonus HP (stacks with reuse armor). */
+  readonly fortification?: number;
+  /** Bomb owner — tile is hidden from other players until triggered. */
+  readonly bombOwnerId?: string;
+  /** This placement's special effect already fired (arm/trigger). */
+  readonly specialSpent?: boolean;
 }
