@@ -18,10 +18,10 @@ import {
   buildInitialWorld,
   eliminateByForfeit,
   getPlayer,
-  hexEquals,
+  hexKey,
   makeRng,
+  resolveWordFromPath,
   tickWorld,
-  tileHasDraftableLetter,
   worldToSnapshot,
   type GameCommand,
   type Letter,
@@ -139,13 +139,13 @@ export const createGameLoop = (
     }
     const owner = getPlayer(world, player.id);
     const lettersForPath = (path: readonly { q: number; r: number }[]): Letter[] | null => {
+      const resolved = resolveWordFromPath(path, owner.tiles);
+      if (!resolved) return null;
       const letters: Letter[] = [];
       for (const h of path) {
-        const tile = owner.tiles.find((t) => hexEquals(t.hex, h));
-        if (!tile || !tileHasDraftableLetter(tile)) {
-          return null;
-        }
-        letters.push(tile.letter);
+        const letter = resolved.resolvedByHex.get(hexKey(h));
+        if (!letter) return null;
+        letters.push(letter);
       }
       return letters;
     };

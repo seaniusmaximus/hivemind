@@ -48,6 +48,11 @@ const OPPONENT_PANELS: readonly BeePanel[] = [
 
 type DragMode = 'word-draft' | 'letter-move' | null;
 
+type PositionedTile = TileSnapshot & {
+  pixel: { x: number; y: number };
+  isFrontier: boolean;
+};
+
 const HEX_SIZE = 30;
 const REUSE_RING_STEP = 4;
 const MIN_RING_SIZE = 8;
@@ -217,7 +222,7 @@ export const HiveGrid = ({ side, opponentIndex = 0 }: Props) => {
   const pendingLetterAnchorRef = useRef<Hex | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const tileByKeyRef = useRef(new Map<string, TileSnapshot>());
+  const tileByKeyRef = useRef(new Map<string, PositionedTile>());
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
   zoomRef.current = zoom;
@@ -325,13 +330,13 @@ export const HiveGrid = ({ side, opponentIndex = 0 }: Props) => {
   const frontier = useMemo(() => frontierFor(player), [player]);
   const ownedKeys = useMemo(() => new Set(tiles.map((t) => hexKey(t.hex))), [tiles]);
 
-  const positioned = useMemo(() => {
-    const base = tiles.map((t: TileSnapshot) => ({
+  const positioned = useMemo((): PositionedTile[] => {
+    const base: PositionedTile[] = tiles.map((t) => ({
       ...t,
       pixel: axialToPixel(t.hex, HEX_SIZE),
       isFrontier: false,
     }));
-    const front = frontier
+    const front: PositionedTile[] = frontier
       .filter((h) => !ownedKeys.has(hexKey(h)))
       .map((h) => ({
         hex: h,
@@ -808,9 +813,9 @@ export const HiveGrid = ({ side, opponentIndex = 0 }: Props) => {
                   👑
                 </text>
               )}
-              {showSpecialIcon && !hideLetter && (
+              {showSpecialIcon && t.specialKind && !hideLetter && (
                 <text className="hex-letter special-tile-icon" x={0} y={0}>
-                  {specialTileIcon(t.specialKind!)}
+                  {specialTileIcon(t.specialKind)}
                 </text>
               )}
               {t.letter && !hideLetter && (

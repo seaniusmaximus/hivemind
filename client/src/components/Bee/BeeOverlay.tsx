@@ -255,7 +255,7 @@ const QueenStrikeSpark = ({
 
 /** Letters held in flight render alongside the bee for readability. */
 const carryingLetter = (bee: Bee): string | null => {
-  if (bee.state.kind === 'worker-flying-to-door-carrying') return bee.state.carrying;
+  if (bee.state.kind === 'worker-flying-to-door-carrying') return bee.state.carrying ?? null;
   return null;
 };
 
